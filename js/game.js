@@ -219,7 +219,14 @@ const gamePauseMode2h = document.getElementById("game-pause-mode-2h");
 const gamePauseModeKb = document.getElementById("game-pause-mode-kb");
 const level1EndOverlay = document.getElementById("level1-end-overlay");
 const level1EndVideo = document.getElementById("level1-end-video");
-const level1EndTotals = document.getElementById("level1-end-totals");
+const level1EndMessage = document.getElementById("level1-end-message");
+const level1EndStatsEl = document.getElementById("level1-end-stats");
+const level1EndStatTime = document.getElementById("level1-end-stat-time");
+const level1EndStatDist = document.getElementById("level1-end-stat-dist");
+const level1EndStatScore = document.getElementById("level1-end-stat-score");
+const level1EndRowTime = document.getElementById("level1-end-row-time");
+const level1EndRowDist = document.getElementById("level1-end-row-dist");
+const level1EndRowScore = document.getElementById("level1-end-row-score");
 const gameOverOverlay = document.getElementById("game-over-overlay");
 const gameOverScoreLine = document.getElementById("game-over-score-line");
 const btnGameOverMenu = document.getElementById("btn-game-over-menu");
@@ -268,6 +275,9 @@ let level1EndCinematicStarted = false;
 let level1EndRevealStartedAtMs = 0;
 /** Timeout id for deferred return to menu after level end. */
 let level1EndFinishTimer = 0;
+/** Cancel token + rAF for level-end stat count-up animation. */
+let level1EndStatAnimToken = 0;
+let level1EndStatRaf = 0;
 /** Snapshot at level-1 win landing (totals + high score after end video). */
 let level1WinDist = 0;
 let level1WinScore = 0;
@@ -1820,18 +1830,100 @@ function playJumpOverObstaclesAnim() {
   playerBody.velocity.y = Math.max(playerBody.velocity.y, SPACE_JUMP_VY);
 }
 
+function easeOutCubic(t) {
+  return 1 - (1 - t) ** 3;
+}
+
+function stopLevel1EndStatAnim() {
+  level1EndStatAnimToken += 1;
+  if (level1EndStatRaf) {
+    cancelAnimationFrame(level1EndStatRaf);
+    level1EndStatRaf = 0;
+  }
+  for (const row of [level1EndRowTime, level1EndRowDist, level1EndRowScore]) {
+    row?.classList.remove("level1-end-stat-row--tick");
+  }
+}
+
+function resetLevel1EndStatsDom() {
+  stopLevel1EndStatAnim();
+  if (level1EndMessage) {
+    level1EndMessage.textContent = "Finishing run…";
+    level1EndMessage.classList.remove("hidden");
+  }
+  if (level1EndStatsEl) {
+    level1EndStatsEl.classList.add("hidden");
+  }
+  if (level1EndStatTime) level1EndStatTime.textContent = "0.00 s";
+  if (level1EndStatDist) level1EndStatDist.textContent = "0 m";
+  if (level1EndStatScore) level1EndStatScore.textContent = "0";
+}
+
 function refreshLevel1EndTotalsText() {
-  if (!level1EndTotals) return;
+  if (!level1EndStatTime || !level1EndStatDist || !level1EndStatScore) return;
   const timeSec = Math.max(0, (level1FinishedAtMs - runStartAtMs) / 1000);
   const dist = level1WinDist;
   const score = level1WinScore;
-  const lines = [
-    `Time: ${timeSec.toFixed(2)} s`,
-    `Distance: ${dist} m`,
-    `Score: ${score}`,
-  ];
-  level1EndTotals.textContent = lines.join("\n");
-  level1EndTotals.style.whiteSpace = "pre-line";
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  stopLevel1EndStatAnim();
+  const animToken = level1EndStatAnimToken;
+
+  if (level1EndMessage) level1EndMessage.classList.add("hidden");
+  if (level1EndStatsEl) level1EndStatsEl.classList.remove("hidden");
+
+  if (reduced) {
+    level1EndStatTime.textContent = `${timeSec.toFixed(2)} s`;
+    level1EndStatDist.textContent = `${dist} m`;
+    level1EndStatScore.textContent = String(score);
+    return;
+  }
+
+  const DURATION_MS = 920;
+  const stagger = [0, 240, 480];
+  const start = performance.now();
+
+  function tick(now) {
+    if (animToken !== level1EndStatAnimToken) return;
+    const elapsed = now - start;
+
+    const tProg = Math.min(1, Math.max(0, (elapsed - stagger[0]) / DURATION_MS));
+    const tEase = easeOutCubic(tProg);
+    const timeShow = timeSec * tEase;
+    level1EndStatTime.textContent = `${timeShow.toFixed(2)} s`;
+    if (tProg >= 1 && level1EndRowTime && !level1EndRowTime.classList.contains("level1-end-stat-row--tick")) {
+      level1EndRowTime.classList.add("level1-end-stat-row--tick");
+    }
+
+    const dProg = Math.min(1, Math.max(0, (elapsed - stagger[1]) / DURATION_MS));
+    const dEase = easeOutCubic(dProg);
+    level1EndStatDist.textContent = `${Math.round(dist * dEase)} m`;
+    if (dProg >= 1 && level1EndRowDist && !level1EndRowDist.classList.contains("level1-end-stat-row--tick")) {
+      level1EndRowDist.classList.add("level1-end-stat-row--tick");
+    }
+
+    const sProg = Math.min(1, Math.max(0, (elapsed - stagger[2]) / DURATION_MS));
+    const sEase = easeOutCubic(sProg);
+    level1EndStatScore.textContent = String(Math.round(score * sEase));
+    if (sProg >= 1 && level1EndRowScore && !level1EndRowScore.classList.contains("level1-end-stat-row--tick")) {
+      level1EndRowScore.classList.add("level1-end-stat-row--tick");
+    }
+
+    const done = elapsed >= DURATION_MS + stagger[2] + 40;
+    if (done) {
+      level1EndStatTime.textContent = `${timeSec.toFixed(2)} s`;
+      level1EndStatDist.textContent = `${dist} m`;
+      level1EndStatScore.textContent = String(score);
+      level1EndStatRaf = 0;
+      return;
+    }
+    level1EndStatRaf = requestAnimationFrame(tick);
+  }
+
+  level1EndStatTime.textContent = "0.00 s";
+  level1EndStatDist.textContent = "0 m";
+  level1EndStatScore.textContent = "0";
+  level1EndStatRaf = requestAnimationFrame(tick);
 }
 
 function hideLevel1EndOverlay() {
@@ -1839,6 +1931,7 @@ function hideLevel1EndOverlay() {
     clearTimeout(level1EndFinishTimer);
     level1EndFinishTimer = 0;
   }
+  resetLevel1EndStatsDom();
   if (!level1EndOverlay) return;
   level1EndOverlay.classList.remove("level1-end--revealed");
   level1EndOverlay.classList.add("hidden");
@@ -1868,14 +1961,14 @@ function scheduleLevel1EndReturnToMenu() {
 
 /** Fullscreen end video (muted) + animated tint; call while airborne before final landing. */
 function showLevel1EndOverlayBeginning() {
-  if (!level1EndOverlay || !level1EndTotals) return;
+  if (!level1EndOverlay) return;
+  if (!level1EndMessage || !level1EndStatsEl) return;
   if (level1EndFinishTimer) {
     clearTimeout(level1EndFinishTimer);
     level1EndFinishTimer = 0;
   }
   level1EndRevealStartedAtMs = performance.now();
-  level1EndTotals.textContent = "Finishing run…";
-  level1EndTotals.style.whiteSpace = "normal";
+  resetLevel1EndStatsDom();
 
   level1EndOverlay.classList.remove("hidden", "level1-end--revealed");
   level1EndOverlay.setAttribute("aria-hidden", "false");
