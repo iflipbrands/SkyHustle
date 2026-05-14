@@ -37,21 +37,25 @@ const DIR_ASSETS = "./assets/";
 const DIR_PLACEHOLDERS = `${DIR_ASSETS}placeholders/`;
 
 const LEVEL1_END_VIDEO_SRC = `${DIR_ANIM}level1-end.mp4`;
-/** Intro-alley neighbourhood (modular low-poly); scaled to the run strip, vertex-colored at load. */
-const NEIGHBOURHOOD_CITY_GLB = `${DIR_ENV}neighbourhood_city_modular_lowpoly.glb`;
-/** Solid backdrop (no sky texture) — dusk purple. */
-const PURPLE_SCENE_BG = 0x24142d;
-/** Fog tints: alley matches purple world; rooftop stays light for readability. */
-const ALLEY_FOG_COLOR = 0x3a2648;
-const ROOFTOP_FOG_COLOR = 0xd6c8e8;
+/** Canonical neighbourhood model (grey in {@link applyNeighbourhoodGrayMaterials}); same-origin GLB first, then GitHub raw. */
+const NEIGHBOURHOOD_CITY_GLB_REMOTE =
+  "https://raw.githubusercontent.com/iflipbrands/SkyHustle/main/environment/neighbourhood_city_modular_lowpoly.glb";
+const NEIGHBOURHOOD_CITY_GLB_LOCAL = `${DIR_ENV}neighbourhood_city_modular_lowpoly.glb`;
+const NEIGHBOURHOOD_CITY_GLB_URLS = [NEIGHBOURHOOD_CITY_GLB_LOCAL, NEIGHBOURHOOD_CITY_GLB_REMOTE];
+/** Three.js fill behind the 3D layer — neutral gray (not HTML purple); canvas is opaque. */
+const RUN_SCENE_BACKGROUND = 0x6a6f78;
+/** Solid gray for all neighbourhood meshes (high emissive so they read without strong sun). */
+const NEIGHBOURHOOD_BUILDING_GRAY = 0x9a9ea5;
 /** Extra scale on imported neighbourhood so streets read huge vs. character (re-grounded after). */
 const NEIGHBOURHOOD_SCALE_BOOST = 3.35;
 /** Minimum time the level-end overlay stays up (video + tint + copy), ms. */
 const LEVEL1_END_MIN_DURATION_MS = 12000;
 /** Player spawn +Z at level run start. */
 const RUN_START_Z = 210;
+/** World +Z where we center the fitted neighbourhood (player starts at {@link RUN_START_Z}). */
+const NEIGHBOURHOOD_RUN_Z_ANCHOR = RUN_START_Z + 140;
 /**
- * Neighbourhood strip length (m) along +Z for fitting {@link NEIGHBOURHOOD_CITY_GLB}
+ * Neighbourhood strip length (m) along +Z for fitting the modular GLB
  * (covers ribbon, gap, and landing band in world +Z).
  */
 const NEIGHBOURHOOD_RUN_LENGTH = Math.max(520, LEVEL1_LAND_COMPLETE_MIN_Z + 160);
@@ -65,7 +69,7 @@ const TILE_POOL = 24;
 const RUNWAY_GAP_EVERY_SECONDS = 6.5;
 const SOLID_TILES_BETWEEN_GAPS = Math.max(1, Math.round((FORWARD_SPEED * RUNWAY_GAP_EVERY_SECONDS) / TILE_Z));
 const TILES_PER_RUNWAY_CYCLE = SOLID_TILES_BETWEEN_GAPS + 1;
-const ENABLE_GAPS = true;
+const ENABLE_GAPS = false;
 const SPAWN_Z_AHEAD_MIN = 28;
 const SPAWN_Z_AHEAD_MAX = 72;
 /** Spawn at most one obstacle row every this many ground-tile advances (~{@link TILE_Z} m each). */
@@ -78,8 +82,8 @@ const TRASHCAN_SPEC = `${DIR_ASSETS}trashcan/spec.jpg`;
 const INVINCIBLE_MS = 2200;
 const ACTION_COOLDOWN_MS = 220;
 const COINS_ENABLED = false;
-/** Enable obstacles (trash cans + optional dumpster FBX). */
-const OBSTACLES_ENABLED = true;
+/** Obstacles off — neighbourhood run only. */
+const OBSTACLES_ENABLED = false;
 
 const RAY_BASE_X = 0.35;
 const RAY_BASE_Y = 1.35;
@@ -269,7 +273,9 @@ let level1WinDist = 0;
 let level1WinScore = 0;
 /** @type {"rooftop"} */
 let runSegment = "rooftop";
-/** Imported modular neighbourhood (only visible during a run). */
+/** Grey deck under the lanes — physics tiles have no mesh; this is what you “run on”. */
+let visibleRunwayPlane = null;
+/** Imported modular neighbourhood (visible after {@link buildNeighbourhoodWorld}). */
 let neighbourhoodWorldGroup = null;
 /** In keyboard control mode, forward +Z run while Arrow Up or W is held. */
 let kbRunForwardHeld = false;
@@ -277,6 +283,7 @@ let kbRunForwardHeld = false;
 let gameMusicEl = null;
 
 const loader = new GLTFLoader();
+loader.crossOrigin = "anonymous";
 const gltfCache = new Map();
 const fbxLoader = new FBXLoader();
 const fbxCache = new Map();
@@ -1630,12 +1637,18 @@ function updateCamera() {
 
 function initThree() {
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(PURPLE_SCENE_BG);
-  scene.fog = new THREE.Fog(ROOFTOP_FOG_COLOR, 55, 300);
+  scene.background = new THREE.Color(RUN_SCENE_BACKGROUND);
+  scene.fog = null;
 
-  camera = new THREE.PerspectiveCamera(70, 1, 0.1, 1200);
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  camera = new THREE.PerspectiveCamera(70, 1, 0.35, 20000);
+  renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    alpha: false,
+    logarithmicDepthBuffer: true,
+  });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(RUN_SCENE_BACKGROUND, 1);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -1650,11 +1663,11 @@ function initThree() {
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 220;
-  sun.shadow.camera.left = -85;
-  sun.shadow.camera.right = 85;
-  sun.shadow.camera.top = 85;
-  sun.shadow.camera.bottom = -85;
+  sun.shadow.camera.far = 900;
+  sun.shadow.camera.left = -220;
+  sun.shadow.camera.right = 220;
+  sun.shadow.camera.top = 220;
+  sun.shadow.camera.bottom = -220;
   scene.add(sun);
   const fill = new THREE.DirectionalLight(0xfff4ea, 0.38);
   fill.position.set(10, 11, -7);
@@ -1663,7 +1676,7 @@ function initThree() {
   const ambient = new THREE.AmbientLight(0xd4c4dc, 0.32);
   scene.add(ambient);
 
-  // No global "ground" plane; keeps the scene feeling elevated on rooftops.
+  // Visible runway deck added in {@link ensureVisibleRunwayPlane}; physics tiles stay invisible.
 
   onResize();
   window.addEventListener("resize", onResize);
@@ -1671,6 +1684,7 @@ function initThree() {
   if (frame && typeof ResizeObserver !== "undefined") {
     new ResizeObserver(() => onResize()).observe(frame);
   }
+  applyRunSceneBackdrop();
 }
 
 function onResize() {
@@ -1723,8 +1737,8 @@ function initPhysics() {
 }
 
 function isGapSegment(baseZ) {
-  if (baseZ === LEVEL1_GAP_TILE_CENTER_Z) return true;
   if (!ENABLE_GAPS) return false;
+  if (baseZ === LEVEL1_GAP_TILE_CENTER_Z) return true;
   const tileIndex = Math.floor(baseZ / TILE_Z);
   if (tileIndex <= 4) return false;
   /** Finish ribbon + landing: only the scripted gap tile is open; rest stays solid. */
@@ -2214,32 +2228,57 @@ async function buildGroundTiles() {
   }
 }
 
-/** Main menu / leave run — lighter fog; hide modular neighbourhood. */
+/** Opaque neutral backdrop + no fog so huge grey city is not clipped to “empty purple”. */
+function applyRunSceneBackdrop() {
+  if (!scene || !renderer) return;
+  scene.background = new THREE.Color(RUN_SCENE_BACKGROUND);
+  scene.fog = null;
+  renderer.setClearColor(RUN_SCENE_BACKGROUND, 1);
+}
+
+/** Main menu / leave run — same backdrop; neighbourhood stays visible. */
 function restoreRooftopPresentation() {
   runSegment = "rooftop";
   if (world) world.gravity.set(0, -32, 0);
-  if (scene?.fog) {
-    scene.fog.color.setHex(ROOFTOP_FOG_COLOR);
-    scene.fog.near = 55;
-    scene.fog.far = 300;
-  }
-  if (neighbourhoodWorldGroup) neighbourhoodWorldGroup.visible = false;
+  applyRunSceneBackdrop();
+  if (neighbourhoodWorldGroup) neighbourhoodWorldGroup.visible = true;
 }
 
-/** Start-of-run: show neighbourhood + dusk fog (no separate alley/runway meshes). */
+/** Start-of-run — same backdrop; neighbourhood already visible. */
 function applyNeighbourhoodRunStartState() {
   runSegment = "rooftop";
   if (world) world.gravity.set(0, -32, 0);
-  if (scene?.fog) {
-    scene.fog.color.setHex(ALLEY_FOG_COLOR);
-    scene.fog.near = 28;
-    scene.fog.far = 420;
-  }
+  applyRunSceneBackdrop();
   if (neighbourhoodWorldGroup) neighbourhoodWorldGroup.visible = true;
 }
 
 function getActiveRunSurfaceY() {
   return RUNWAY_SURFACE_Y;
+}
+
+/** Wide grey plane under the run — follows the player in +Z (physics slabs have no render mesh). */
+function ensureVisibleRunwayPlane() {
+  if (visibleRunwayPlane || !scene) return;
+  const geo = new THREE.PlaneGeometry(56, 420);
+  geo.rotateX(-Math.PI / 2);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x5a5e66,
+    roughness: 0.94,
+    metalness: 0.02,
+    emissive: new THREE.Color(0x2e3035),
+    emissiveIntensity: 0.35,
+    side: THREE.DoubleSide,
+  });
+  visibleRunwayPlane = new THREE.Mesh(geo, mat);
+  visibleRunwayPlane.receiveShadow = true;
+  visibleRunwayPlane.name = "visibleRunwayDeck";
+  scene.add(visibleRunwayPlane);
+  syncVisibleRunwayPlane();
+}
+
+function syncVisibleRunwayPlane() {
+  if (!visibleRunwayPlane || !playerBody) return;
+  visibleRunwayPlane.position.set(0, RUNWAY_SURFACE_Y - 0.04, playerBody.position.z);
 }
 
 function recycleGroundTiles() {
@@ -2294,76 +2333,92 @@ function fitNeighbourhoodToAlley(root, targetWidth, targetLength) {
 }
 
 /**
- * Pastel low-poly read: roads / sidewalks / roofs / facades from world Y and normals; replaces maps with vertex colors.
- * @param {THREE.Object3D} root
+ * One shared gray material for the whole modular city (no vertex colors — avoids invisible / wrong-tint meshes).
+ * Emissive + double side so it reads even when shadowed or normals are odd.
  */
-function bakeNeighbourhoodVertexColors(root) {
+function applyNeighbourhoodGrayMaterials(root) {
+  const mat = new THREE.MeshStandardMaterial({
+    color: NEIGHBOURHOOD_BUILDING_GRAY,
+    roughness: 0.9,
+    metalness: 0.03,
+    emissive: new THREE.Color(0x3a3d42),
+    emissiveIntensity: 0.62,
+    flatShading: true,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    depthTest: true,
+  });
   root.updateMatrixWorld(true);
-  const c = new THREE.Color();
-  const wp = new THREE.Vector3();
-  const wn = new THREE.Vector3();
   root.traverse((obj) => {
-    if (!obj.isMesh || !obj.geometry || !obj.geometry.attributes?.position) return;
+    if (!obj.isMesh && !obj.isInstancedMesh) return;
     const geo = obj.geometry;
-    const pos = geo.attributes.position;
-    const nrm = geo.attributes.normal;
-    const count = pos.count;
-    const arr = new Float32Array(count * 3);
-    for (let i = 0; i < count; i++) {
-      wp.fromBufferAttribute(pos, i).applyMatrix4(obj.matrixWorld);
-      if (nrm) wn.fromBufferAttribute(nrm, i).transformDirection(obj.matrixWorld).normalize();
-      else wn.set(0, 1, 0);
-      const ny = wn.y;
-      const py = wp.y;
-      if (ny > 0.45) {
-        if (py < 0.85) {
-          c.setRGB(0.22, 0.23, 0.28);
-        } else if (py < 3.2) {
-          c.setRGB(0.52, 0.54, 0.52);
-        } else {
-          c.setRGB(0.7, 0.55, 0.45);
-        }
-      } else if (ny < -0.35) {
-        c.setRGB(0.16, 0.15, 0.2);
-      } else {
-        const wobble = 0.04 * Math.sin(wp.x * 0.12 + wp.z * 0.09);
-        c.setHSL(0.07 + wobble * 0.5, 0.32, 0.38 + ny * 0.06);
-      }
-      arr[i * 3] = c.r;
-      arr[i * 3 + 1] = c.g;
-      arr[i * 3 + 2] = c.b;
+    if (geo) {
+      if (geo.attributes.color) geo.deleteAttribute("color");
+      if (!geo.attributes.normal) geo.computeVertexNormals();
     }
-    if (geo.attributes.color) geo.deleteAttribute("color");
-    geo.setAttribute("color", new THREE.BufferAttribute(arr, 3));
-    const toVcMat = (m) => {
-      if (!m) return m;
-      return new THREE.MeshStandardMaterial({
-        color: 0xffffff,
-        roughness: m.roughness != null ? m.roughness : 0.88,
-        metalness: m.metalness != null ? m.metalness : 0.04,
-        emissive: m.emissive?.clone?.() ?? new THREE.Color(0),
-        emissiveIntensity: m.emissiveIntensity ?? 0,
-        transparent: !!m.transparent,
-        opacity: m.opacity != null ? m.opacity : 1,
-        side: m.side ?? THREE.FrontSide,
-        vertexColors: true,
-        flatShading: true,
-        envMap: m.envMap || undefined,
-        envMapIntensity: m.envMapIntensity ?? 0.55,
-      });
-    };
-    if (Array.isArray(obj.material)) obj.material = obj.material.map(toVcMat);
-    else obj.material = toVcMat(obj.material);
+    obj.material = mat;
+    obj.castShadow = true;
+    obj.receiveShadow = true;
+    obj.frustumCulled = false;
   });
 }
 
-/** Load {@link NEIGHBOURHOOD_CITY_GLB} once — sole run environment (no procedural alley / runway strip). */
+/** If the GLB has no meshes (load fail / empty), add a simple gray strip so the run is never “void purple”. */
+function addNeighbourhoodFallbackStrip(parent) {
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x7c8088,
+    roughness: 0.88,
+    metalness: 0.02,
+    emissive: new THREE.Color(0x35373c),
+    emissiveIntensity: 0.55,
+    side: THREE.DoubleSide,
+  });
+  const len = NEIGHBOURHOOD_RUN_LENGTH;
+  const halfW = 14;
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(halfW * 2 + 20, len), mat);
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.set(0, 0.02, len * 0.5);
+  floor.name = "neighbourhoodFallbackFloor";
+  parent.add(floor);
+  const wallH = 32;
+  const wallD = len * 0.95;
+  const wallGeo = new THREE.BoxGeometry(5, wallH, wallD);
+  const left = new THREE.Mesh(wallGeo, mat);
+  left.position.set(-(halfW + 3.5), wallH * 0.5, len * 0.5);
+  left.name = "neighbourhoodFallbackWallL";
+  parent.add(left);
+  const right = new THREE.Mesh(wallGeo, mat);
+  right.position.set(halfW + 3.5, wallH * 0.5, len * 0.5);
+  right.name = "neighbourhoodFallbackWallR";
+  parent.add(right);
+}
+
+function countDrawableNeighbourhoodMeshes(root) {
+  let n = 0;
+  root.traverse((o) => {
+    if (o.isMesh || o.isInstancedMesh) n += 1;
+  });
+  return n;
+}
+
+/** Load neighbourhood GLB (GitHub raw first, then repo copy) — grey materials; visible from first frame after load. */
 async function buildNeighbourhoodWorld() {
   if (neighbourhoodWorldGroup) return;
   const g = new THREE.Group();
   g.name = "neighbourhoodWorld";
+  let loadedUrl = "";
   try {
-    const gltf = await loadGltf(NEIGHBOURHOOD_CITY_GLB);
+    let gltf = null;
+    for (const url of NEIGHBOURHOOD_CITY_GLB_URLS) {
+      try {
+        gltf = await loadGltf(url);
+        loadedUrl = url;
+        break;
+      } catch (e) {
+        console.warn("[World] Neighbourhood load failed, next URL:", url, e);
+      }
+    }
+    if (!gltf) throw new Error("All neighbourhood GLB URLs failed");
     const hood = gltf.scene.clone(true);
     hood.name = "neighbourhoodCity";
     hood.traverse((ch) => {
@@ -2373,14 +2428,25 @@ async function buildNeighbourhoodWorld() {
       }
     });
     fitNeighbourhoodToAlley(hood, NEIGHBOURHOOD_RUN_WIDTH, NEIGHBOURHOOD_RUN_LENGTH);
-    bakeNeighbourhoodVertexColors(hood);
+    applyNeighbourhoodGrayMaterials(hood);
     g.add(hood);
-    console.info("[World] Neighbourhood GLB:", NEIGHBOURHOOD_CITY_GLB);
+    console.info("[World] Neighbourhood GLB loaded:", loadedUrl);
   } catch (err) {
     console.error("[World] Neighbourhood GLB failed:", err);
   }
+  if (countDrawableNeighbourhoodMeshes(g) === 0) {
+    console.warn("[World] No neighbourhood meshes — adding gray fallback strip.");
+    addNeighbourhoodFallbackStrip(g);
+  }
   g.position.set(0, RUNWAY_SURFACE_Y, 0);
-  g.visible = false;
+  g.updateMatrixWorld(true);
+  const worldBox = new THREE.Box3().setFromObject(g);
+  if (!worldBox.isEmpty()) {
+    const midZ = (worldBox.min.z + worldBox.max.z) * 0.5;
+    g.position.z = NEIGHBOURHOOD_RUN_Z_ANCHOR - midZ;
+  }
+  g.updateMatrixWorld(true);
+  g.visible = true;
   scene.add(g);
   neighbourhoodWorldGroup = g;
 }
@@ -2935,7 +3001,7 @@ function updateHud(dt) {
     } else if (level1EndCinematicStarted) {
       hudDistance.textContent = `Finishing…`;
     } else if (passedFinishRibbon) {
-      hudDistance.textContent = `Jump the gap! · ${elapsedSecs.toFixed(1)} s`;
+      hudDistance.textContent = `Past the line · ${elapsedSecs.toFixed(1)} s`;
     } else {
       const remain = Math.max(0, Math.ceil(FINISH_RIBBON_Z - playerBody.position.z));
       hudDistance.textContent = `${remain} m to line · ${elapsedSecs.toFixed(1)} s`;
@@ -2975,6 +3041,7 @@ function stepPlaying(dt) {
   recycleGroundTiles();
   spawnContentAhead();
   cullBehind();
+  syncVisibleRunwayPlane();
   if (COINS_ENABLED) {
     updateCoinsVisual();
     checkCoinCollection();
@@ -2991,11 +3058,13 @@ function animate() {
       stepPlaying(dt);
     } else if (state === "playing" && runPaused) {
       syncPlayerMesh(dt);
+      syncVisibleRunwayPlane();
       updateCamera();
       updateHud(dt);
     } else if (playerRoot && playerBody) {
       playerRoot.position.copy(playerBody.position);
       syncPlayerFacingFromVelocity();
+      syncVisibleRunwayPlane();
       updateCamera();
     }
     renderer.render(scene, camera);
@@ -3265,7 +3334,6 @@ async function bootstrap() {
   syncMenuControlButtons();
   applyTouchLayout();
   initThree();
-  scene.background = new THREE.Color(PURPLE_SCENE_BG);
   initPhysics();
   bindUi();
 
@@ -3340,6 +3408,7 @@ async function bootstrap() {
 
   await buildPlayer();
   await buildGroundTiles();
+  ensureVisibleRunwayPlane();
   await buildNeighbourhoodWorld();
   restoreRooftopPresentation();
 
