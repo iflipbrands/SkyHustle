@@ -6,7 +6,7 @@ import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { clone as cloneSkinnedHierarchy } from "three/addons/utils/SkeletonUtils.js";
 import * as CANNON from "cannon-es";
 
-/** Three rooftop columns by world X (low → high). `laneIndex` 0 | 1 | 2. See `laneLeft` / `laneRight` for how keys map to screen. */
+/** Three lane offsets perpendicular to current run heading. `laneIndex` 0 | 1 | 2. {@link tryNavigateLaneOrTurnLeft} / laneRight: tap = lane, double-tap or Shift = 90° corner. */
 const LANES = [-1.82, 0, 1.82];
 /** Forward run speed (m/s-ish); higher = snappier lane dodging. */
 const FORWARD_SPEED = 18;
@@ -52,8 +52,8 @@ const NEIGHBOURHOOD_SCALE_BOOST = 3.35;
 const LEVEL1_END_MIN_DURATION_MS = 12000;
 /** Player spawn +Z at level run start. */
 const RUN_START_Z = 210;
-/** World +Z where we center the fitted neighbourhood (player starts at {@link RUN_START_Z}). */
-const NEIGHBOURHOOD_RUN_Z_ANCHOR = RUN_START_Z + 140;
+/** Keep the front of the fitted neighbourhood a bit behind spawn so the run “starts at the beginning” of the asset. */
+const NEIGHBOURHOOD_SPAWN_LEAD_Z = 18;
 /**
  * Neighbourhood strip length (m) along +Z for fitting the modular GLB
  * (covers ribbon, gap, and landing band in world +Z).
@@ -81,6 +81,10 @@ const TRASHCAN_BUMP = `${DIR_ASSETS}trashcan/bump.jpg`;
 const TRASHCAN_SPEC = `${DIR_ASSETS}trashcan/spec.jpg`;
 const INVINCIBLE_MS = 2200;
 const ACTION_COOLDOWN_MS = 220;
+/** Second left/right tap within this window → 90° corner (no extra lane step). */
+const TURN_DOUBLE_TAP_MS = 400;
+/** Avoid chained micro-rotations from noisy input. */
+const WORLD_RUN_TURN_COOLDOWN_MS = 380;
 const COINS_ENABLED = false;
 /** Obstacles off — neighbourhood run only. */
 const OBSTACLES_ENABLED = false;
@@ -253,6 +257,14 @@ let rayMesh = null;
 const lastRunForward = new THREE.Vector3(0, 0, 1);
 const _camBehind = new THREE.Vector3();
 const _camLook = new THREE.Vector3();
+/** World Y rotation of the run (radians). 0 = forward +world Z; +π/2 = forward +world X. */
+let worldRunYaw = 0;
+/** XZ origin for lane offsets: lateral = dot(P − runOrigin, runRight). Updated on 90° turns. */
+const runOrigin = new THREE.Vector3(0, 0, 0);
+const _runForward = new THREE.Vector3(0, 0, 1);
+const _runRight = new THREE.Vector3(1, 0, 0);
+/** Forward axis before a corner (for re-anchoring runOrigin). */
+const _tmpFold = new THREE.Vector3();
 /** @type {THREE.AnimationMixer | null} */
 let ceezAnimMixer = null;
 /** @type {THREE.AnimationAction | null} */
@@ -264,6 +276,8 @@ let ceezJumpOverObstaclesAction = null;
 /** @type {THREE.Group | null} */
 let finishLineVisual = null;
 let runStartAtMs = 0;
+/** Forward distance accumulated this run (m) — ribbon + HUD use this so 90° turns do not stall progress. */
+let runDistanceTraveledM = 0;
 /** Set when level-1 victory sequence starts (for overlay time). */
 let level1FinishedAtMs = 0;
 let passedFinishRibbon = false;
@@ -285,6 +299,8 @@ let level1WinScore = 0;
 let runSegment = "rooftop";
 /** Grey deck under the lanes — physics tiles have no mesh; this is what you “run on”. */
 let visibleRunwayPlane = null;
+/** Large flat Cannon slab so strafing / 90° turns stay on collider (narrow recycled tiles are +Z only). */
+let neighbourhoodWideGroundBody = null;
 /** Imported modular neighbourhood (visible after {@link buildNeighbourhoodWorld}). */
 let neighbourhoodWorldGroup = null;
 /** In keyboard control mode, forward +Z run while Arrow Up or W is held. */
@@ -307,6 +323,9 @@ let ceezObjFallbackTexPromise = null;
 let ceezHoodiePatternTexPromise = null;
 
 let laneIndex = 1;
+let laneNavLastLeftMs = 0;
+let laneNavLastRightMs = 0;
+let lastWorldRunTurnAtMs = 0;
 let coins = 0;
 let lives = 3;
 let invincibleUntil = 0;
@@ -2023,13 +2042,13 @@ function beginLevel1VictoryFreezeAfterLand() {
 
 function passFinishRibbonIfNeeded() {
   if (passedFinishRibbon) return;
-  if (playerBody?.position.z >= FINISH_RIBBON_Z) passedFinishRibbon = true;
+  if (runDistanceTraveledM >= FINISH_RIBBON_Z) passedFinishRibbon = true;
 }
 
 function tryCompleteLevel1AfterLanding() {
   if (level1VictoryFreeze) return;
   if (!passedFinishRibbon || !playerBody) return;
-  if (playerBody.position.z < LEVEL1_LAND_COMPLETE_MIN_Z) return;
+  if (playerBody.position.z < LEVEL1_LAND_COMPLETE_MIN_Z && runDistanceTraveledM < LEVEL1_LAND_COMPLETE_MIN_Z) return;
   if (!isPlayerGroundedForSpaceJump()) return;
   if (!level1EndCinematicStarted) {
     level1EndCinematicStarted = true;
@@ -2037,7 +2056,7 @@ function tryCompleteLevel1AfterLanding() {
     showLevel1EndOverlayBeginning();
   }
   level1FinishedAtMs = performance.now();
-  level1WinDist = Math.max(0, Math.floor(playerBody.position.z));
+  level1WinDist = Math.max(0, Math.floor(runDistanceTraveledM));
   level1WinScore = level1WinDist;
   refreshLevel1EndTotalsText();
   beginLevel1VictoryFreezeAfterLand();
@@ -2074,6 +2093,14 @@ function ensureFinishLineVisual() {
   group.add(leftPole, rightPole, ribbon);
   finishLineVisual = group;
   scene.add(group);
+  syncFinishLineVisualWorldPose();
+}
+
+function syncFinishLineVisualWorldPose() {
+  if (!finishLineVisual) return;
+  const d = FINISH_RIBBON_Z;
+  finishLineVisual.position.set(runOrigin.x + _runForward.x * d, 0, runOrigin.z + _runForward.z * d);
+  finishLineVisual.rotation.y = worldRunYaw;
 }
 
 function disposeProjectileResources(pr) {
@@ -2192,6 +2219,73 @@ function laneLeft() {
 /** Move one rooftop column toward on-screen **right** (D / → / HUD right). */
 function laneRight() {
   laneIndex = Math.max(0, laneIndex - 1);
+}
+
+function updateRunBasisVectors() {
+  _runForward.set(Math.sin(worldRunYaw), 0, Math.cos(worldRunYaw));
+  _runRight.set(Math.cos(worldRunYaw), 0, -Math.sin(worldRunYaw));
+}
+
+/**
+ * After a 90° turn, pick runOrigin so the current lane offset still matches {@link LANES}[laneIndex]
+ * without teleporting the player (uses forward before the yaw step).
+ */
+function reanchorRunOriginAfterTurn(prevForward) {
+  const F = _runForward;
+  const R = _runRight;
+  const p = playerBody.position;
+  const t = (p.x - runOrigin.x) * prevForward.x + (p.z - runOrigin.z) * prevForward.z;
+  const L = LANES[laneIndex];
+  runOrigin.set(p.x - F.x * t - R.x * L, 0, p.z - F.z * t - R.z * L);
+}
+
+function normalizeWorldRunYaw() {
+  const twoPi = Math.PI * 2;
+  worldRunYaw = ((((worldRunYaw + Math.PI) % twoPi) + twoPi) % twoPi) - Math.PI;
+}
+
+function turnRunWorldBy(deltaYaw) {
+  if (state !== "playing" || runPaused || level1VictoryFreeze || level1EndCinematicStarted) return;
+  if (!playerBody) return;
+  const now = performance.now();
+  if (now - lastWorldRunTurnAtMs < WORLD_RUN_TURN_COOLDOWN_MS) return;
+  lastWorldRunTurnAtMs = now;
+  _tmpFold.copy(_runForward);
+  worldRunYaw += deltaYaw;
+  normalizeWorldRunYaw();
+  updateRunBasisVectors();
+  reanchorRunOriginAfterTurn(_tmpFold);
+}
+
+function turnRunWorldLeft() {
+  turnRunWorldBy(Math.PI / 2);
+}
+
+function turnRunWorldRight() {
+  turnRunWorldBy(-Math.PI / 2);
+}
+
+/** Single tap = lane; quick second tap = 90° turn. Shift + side = turn only (no lane). */
+function tryNavigateLaneOrTurnLeft() {
+  const now = performance.now();
+  if (now - laneNavLastLeftMs < TURN_DOUBLE_TAP_MS) {
+    laneNavLastLeftMs = 0;
+    turnRunWorldLeft();
+    return;
+  }
+  laneNavLastLeftMs = now;
+  laneLeft();
+}
+
+function tryNavigateLaneOrTurnRight() {
+  const now = performance.now();
+  if (now - laneNavLastRightMs < TURN_DOUBLE_TAP_MS) {
+    laneNavLastRightMs = 0;
+    turnRunWorldRight();
+    return;
+  }
+  laneNavLastRightMs = now;
+  laneRight();
 }
 
 /** Simple stand-in when `PLAYER_USE_GREY_PROXY`: grey capsule, feet at y=0, ~`CEEZ_TARGET_HEIGHT` tall. */
@@ -2319,6 +2413,22 @@ async function buildGroundTiles() {
     scene.add(tile);
     groundTiles.push(tile);
   }
+  ensureNeighbourhoodWideGroundPhysics();
+}
+
+function ensureNeighbourhoodWideGroundPhysics() {
+  if (neighbourhoodWideGroundBody || !world) return;
+  const halfXZ = 560;
+  const body = new CANNON.Body({ mass: 0, material: groundPhysicsMaterial });
+  body.addShape(new CANNON.Box(new CANNON.Vec3(halfXZ, 0.16, halfXZ)));
+  body.position.set(0, 0.14, RUN_START_Z + 240);
+  body.userData = { type: "neighbourhoodWideGround" };
+  world.addBody(body);
+  neighbourhoodWideGroundBody = body;
+  for (const tile of groundTiles) {
+    const b = tile.userData?.body;
+    if (b) b.position.y = -140;
+  }
 }
 
 /** Opaque neutral backdrop + no fog so huge grey city is not clipped to “empty purple”. */
@@ -2371,10 +2481,12 @@ function ensureVisibleRunwayPlane() {
 
 function syncVisibleRunwayPlane() {
   if (!visibleRunwayPlane || !playerBody) return;
-  visibleRunwayPlane.position.set(0, RUNWAY_SURFACE_Y - 0.04, playerBody.position.z);
+  visibleRunwayPlane.position.set(playerBody.position.x, RUNWAY_SURFACE_Y - 0.04, playerBody.position.z);
+  visibleRunwayPlane.rotation.set(0, worldRunYaw, 0);
 }
 
 function recycleGroundTiles() {
+  if (neighbourhoodWideGroundBody) return;
   const pz = playerBody.position.z;
   const start = Math.floor((pz - 30) / TILE_Z) * TILE_Z;
   groundTiles.forEach((tile, i) => {
@@ -2535,8 +2647,7 @@ async function buildNeighbourhoodWorld() {
   g.updateMatrixWorld(true);
   const worldBox = new THREE.Box3().setFromObject(g);
   if (!worldBox.isEmpty()) {
-    const midZ = (worldBox.min.z + worldBox.max.z) * 0.5;
-    g.position.z = NEIGHBOURHOOD_RUN_Z_ANCHOR - midZ;
+    g.position.z = RUN_START_Z - NEIGHBOURHOOD_SPAWN_LEAD_Z - worldBox.min.z;
   }
   g.updateMatrixWorld(true);
   g.visible = true;
@@ -2904,12 +3015,7 @@ function checkCoinCollection() {
 
 function syncPlayerFacingFromVelocity() {
   if (!playerRoot || !playerBody) return;
-  /**
-   * Runway forward is always world +Z. Lane changes only move X (`LANES`); `velocity.x` is smoothing
-   * toward the lane, not “where we’re running”. If we blended vx into facing, strafe rotated the
-   * player + camera and the whole road appeared to spin.
-   */
-  lastRunForward.set(0, 0, 1);
+  lastRunForward.copy(_runForward);
   playerRoot.rotation.y =
     Math.atan2(lastRunForward.x, lastRunForward.z) + CEEZ_RUN_HEADING_Y_OFFSET;
 }
@@ -2947,10 +3053,17 @@ function resetRun() {
   kbRunForwardHeld = false;
   applyNeighbourhoodRunStartState();
   laneIndex = 1;
+  laneNavLastLeftMs = 0;
+  laneNavLastRightMs = 0;
+  lastWorldRunTurnAtMs = 0;
+  worldRunYaw = 0;
+  runOrigin.set(0, 0, 0);
+  updateRunBasisVectors();
+  lastRunForward.copy(_runForward);
+  runDistanceTraveledM = RUN_START_Z;
   coins = 0;
   lives = 3;
   invincibleUntil = 0;
-  lastRunForward.set(0, 0, 1);
   passedFinishRibbon = false;
   level1VictoryFreeze = false;
   level1FinishedAtMs = 0;
@@ -2985,7 +3098,7 @@ function resetRun() {
   ensureFinishLineVisual();
   if (finishLineVisual) {
     finishLineVisual.visible = true;
-    finishLineVisual.position.set(0, 0, FINISH_RIBBON_Z);
+    syncFinishLineVisualWorldPose();
   }
 }
 
@@ -3073,7 +3186,7 @@ function showGameOverScreen(score) {
 /** Pit or last life — game over screen, then main menu from button. */
 function endGameLoss() {
   if (state !== "playing") return;
-  const dist = Math.max(0, Math.floor(playerBody.position.z));
+  const dist = Math.max(0, Math.floor(runDistanceTraveledM));
   const score = dist + coins * 100;
   showGameOverScreen(score);
 }
@@ -3084,7 +3197,7 @@ function finishLevel1WinAfterVideo() {
 }
 
 function updateHud(dt) {
-  const dist = Math.max(0, Math.floor(playerBody.position.z));
+  const dist = Math.max(0, Math.floor(runDistanceTraveledM));
   const score = dist + coins * 100;
   if (hudScore) hudScore.textContent = String(score);
   if (hudDistance) {
@@ -3096,7 +3209,7 @@ function updateHud(dt) {
     } else if (passedFinishRibbon) {
       hudDistance.textContent = `Past the line · ${elapsedSecs.toFixed(1)} s`;
     } else {
-      const remain = Math.max(0, Math.ceil(FINISH_RIBBON_Z - playerBody.position.z));
+      const remain = Math.max(0, Math.ceil(FINISH_RIBBON_Z - runDistanceTraveledM));
       hudDistance.textContent = `${remain} m to line · ${elapsedSecs.toFixed(1)} s`;
     }
   }
@@ -3108,14 +3221,23 @@ function stepPlaying(dt) {
   tryCompleteLevel1AfterLanding();
 
   {
-    const targetX = LANES[laneIndex];
-    const vx = (targetX - playerBody.position.x) * LANE_SMOOTH;
+    const F = _runForward;
+    const R = _runRight;
+    const p = playerBody.position;
+    const lat = (p.x - runOrigin.x) * R.x + (p.z - runOrigin.z) * R.z;
+    const latTarget = LANES[laneIndex];
+    const latErr = latTarget - lat;
+    const vR_desired = latErr * LANE_SMOOTH;
     const blocked = level1VictoryFreeze;
+    const kbMode = getControlMode() === "kb";
+    const forward = !kbMode || kbRunForwardHeld;
+    const vF_desired = blocked ? 0 : forward ? FORWARD_SPEED : 0;
     if (!blocked) {
-      playerBody.velocity.x = vx;
-      const kbMode = getControlMode() === "kb";
-      const forward = !kbMode || kbRunForwardHeld;
-      playerBody.velocity.z = forward ? FORWARD_SPEED : 0;
+      playerBody.velocity.x = F.x * vF_desired + R.x * vR_desired;
+      playerBody.velocity.z = F.z * vF_desired + R.z * vR_desired;
+      if (forward) {
+        runDistanceTraveledM += FORWARD_SPEED * dt;
+      }
     } else {
       playerBody.velocity.x = 0;
       playerBody.velocity.z = 0;
@@ -3135,6 +3257,7 @@ function stepPlaying(dt) {
   spawnContentAhead();
   cullBehind();
   syncVisibleRunwayPlane();
+  syncFinishLineVisualWorldPose();
   if (COINS_ENABLED) {
     updateCoinsVisual();
     checkCoinCollection();
@@ -3272,13 +3395,13 @@ function bindUi() {
     });
   };
 
-  bind("btn-lane-left-1h", laneLeft);
-  bind("btn-lane-right-1h", laneRight);
+  bind("btn-lane-left-1h", tryNavigateLaneOrTurnLeft);
+  bind("btn-lane-right-1h", tryNavigateLaneOrTurnRight);
   bind("btn-banana-1h", throwBanana);
   bind("btn-seeds-1h", fireSeeds);
 
-  bind("btn-lane-left-2h", laneLeft);
-  bind("btn-lane-right-2h", laneRight);
+  bind("btn-lane-left-2h", tryNavigateLaneOrTurnLeft);
+  bind("btn-lane-right-2h", tryNavigateLaneOrTurnRight);
   bind("btn-banana-2h", throwBanana);
   bind("btn-seeds-2h", fireSeeds);
 
@@ -3375,13 +3498,21 @@ function bindUi() {
       if (e.code === "KeyA" || e.code === "ArrowLeft" || e.code === "KeyQ") {
         if (e.repeat) return;
         e.preventDefault();
-        laneLeft();
+        if (e.shiftKey) {
+          turnRunWorldLeft();
+        } else {
+          tryNavigateLaneOrTurnLeft();
+        }
         return;
       }
       if (e.code === "KeyD" || e.code === "ArrowRight" || e.code === "KeyE") {
         if (e.repeat) return;
         e.preventDefault();
-        laneRight();
+        if (e.shiftKey) {
+          turnRunWorldRight();
+        } else {
+          tryNavigateLaneOrTurnRight();
+        }
         return;
       }
       if (e.code === "Space" || e.key === " ") {
