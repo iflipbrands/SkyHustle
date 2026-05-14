@@ -1,0 +1,16 @@
+{
+  "name": "sky-hustle",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:models": "node scripts/generate-placeholders.mjs",
+    "start": "node serve.mjs",
+    "lan-ip": "node scripts/show-lan-ip.mjs",
+    "postinstall": "node scripts/generate-placeholders.mjs"
+  },
+  "dependencies": {
+    "cannon-es": "^0.20.0",
+    "three": "^0.170.0"
+  }
+}

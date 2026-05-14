@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Sky Hustle</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            dusk: { bg: "#2c2438", panel: "#3a3048", accent: "#e85d4c", gold: "#f0c14d" },
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; background: #24142d; }
+    /* Portrait 9:16 playfield — letterboxed on wider viewports */
+    #game-letterbox {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #24142d;
+    }
+    #game-9-16 {
+      position: relative;
+      overflow: hidden;
+      aspect-ratio: 9 / 16;
+      width: min(100vw, calc(100vh * 9 / 16));
+      height: min(100vh, calc(100vw * 16 / 9));
+      max-width: 100vw;
+      max-height: 100vh;
+      background: #2c2438;
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
+      container-type: size;
+      container-name: sky-hustle;
+    }
+    #game-canvas { display: block; width: 100%; height: 100%; }
+    .touch-btn {
+      transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease;
+    }
+    .touch-btn:active { transform: scale(0.94); opacity: 0.88; }
+    .touch-btn:focus-visible { outline: 2px solid #f0c14d; outline-offset: 3px; }
+    #touch-layer button { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+    #screen-menu { touch-action: manipulation; }
+    #btn-start {
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    #btn-start img { -webkit-user-drag: none; user-select: none; }
+    .menu-stage {
+      animation: menu-stage-drift 14s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+      transform-origin: center center;
+      will-change: transform;
+    }
+    @keyframes menu-stage-drift {
+      0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+      30% { transform: translate3d(0.2%, -0.4%, 0) scale(1.003); }
+      70% { transform: translate3d(-0.2%, 0.3%, 0) scale(1.002); }
+    }
+    .menu-depth-glow {
+      position: absolute;
+      inset: -8% -8% auto -8%;
+      height: 68%;
+      pointer-events: none;
+      background:
+        radial-gradient(78% 56% at 50% 22%, rgba(240, 193, 77, 0.22) 0%, rgba(240, 193, 77, 0) 68%),
+        radial-gradient(44% 36% at 80% 28%, rgba(255, 101, 64, 0.2) 0%, rgba(255, 101, 64, 0) 72%),
+        radial-gradient(38% 32% at 22% 34%, rgba(108, 255, 173, 0.16) 0%, rgba(108, 255, 173, 0) 74%);
+      mix-blend-mode: screen;
+      opacity: 0.92;
+      animation: menu-ambient-breathe 8.5s ease-in-out infinite;
+    }
+    .menu-orb {
+      position: absolute;
+      pointer-events: none;
+      border-radius: 999px;
+      filter: blur(10px);
+      opacity: 0.45;
+      mix-blend-mode: screen;
+    }
+    .menu-orb-a {
+      top: 12%;
+      left: 4%;
+      width: 10rem;
+      height: 10rem;
+      background: radial-gradient(circle at 30% 30%, rgba(242, 195, 70, 0.95) 0%, rgba(242, 195, 70, 0) 74%);
+      animation: menu-orb-drift-a 10s ease-in-out infinite;
+    }
+    .menu-orb-b {
+      top: 18%;
+      right: 6%;
+      width: 9rem;
+      height: 9rem;
+      background: radial-gradient(circle at 40% 40%, rgba(110, 255, 182, 0.9) 0%, rgba(110, 255, 182, 0) 74%);
+      animation: menu-orb-drift-b 12s ease-in-out infinite;
+    }
+    @keyframes menu-orb-drift-a {
+      0%, 100% { transform: translate3d(0, 0, 0); opacity: 0.4; }
+      50% { transform: translate3d(12px, -8px, 0); opacity: 0.55; }
+    }
+    @keyframes menu-orb-drift-b {
+      0%, 100% { transform: translate3d(0, 0, 0); opacity: 0.36; }
+      50% { transform: translate3d(-10px, 10px, 0); opacity: 0.5; }
+    }
+    @keyframes menu-ambient-breathe {
+      0%, 100% { opacity: 0.82; }
+      50% { opacity: 1; }
+    }
+    .menu-logo-wrap {
+      animation: menu-logo-float 6.8s ease-in-out infinite;
+      transform-origin: center center;
+      will-change: transform;
+    }
+    @keyframes menu-logo-float {
+      0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+      50% { transform: translate3d(0, -3px, 0) rotate(-0.35deg); }
+    }
+    .menu-logo-block { position: relative; display: inline-block; }
+    .menu-logo-shine {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 20;
+      overflow: hidden;
+      -webkit-mask-image: url("ui/menu-logo.png");
+      -webkit-mask-repeat: no-repeat;
+      -webkit-mask-position: center;
+      -webkit-mask-size: contain;
+      mask-image: url("ui/menu-logo.png");
+      mask-repeat: no-repeat;
+      mask-position: center;
+      mask-size: contain;
+    }
+    .menu-logo-shine::after {
+      content: "";
+      position: absolute;
+      inset: -55% -75%;
+      background: linear-gradient(
+        112deg,
+        transparent 0%,
+        transparent 34%,
+        rgba(255, 255, 255, 0.08) 40%,
+        rgba(255, 255, 255, 0.85) 50%,
+        rgba(255, 255, 255, 0.14) 60%,
+        transparent 68%,
+        transparent 100%
+      );
+      width: 72%;
+      transform: rotate(-8deg);
+      opacity: 0.92;
+      animation: menu-logo-gleam 20s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+    }
+    @keyframes menu-logo-gleam {
+      0%, 12% { transform: translateX(-150%) rotate(-8deg); opacity: 0; }
+      20% { opacity: 0.9; }
+      34% { transform: translateX(320%) rotate(-8deg); opacity: 0; }
+      62% { transform: translateX(320%) rotate(-8deg); opacity: 0; }
+      68% { transform: translateX(-120%) rotate(-8deg); opacity: 0; }
+      74% { opacity: 0.55; }
+      84% { transform: translateX(270%) rotate(-8deg); opacity: 0; }
+      100% { transform: translateX(270%) rotate(-8deg); opacity: 0; }
+    }
+    .menu-hero-float {
+      animation: none;
+      transform-origin: center bottom;
+    }
+    @keyframes menu-hero-float {
+      0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+      30% { transform: translate3d(-2px, -1px, 0) rotate(-0.2deg); }
+      70% { transform: translate3d(2px, 1px, 0) rotate(0.18deg); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .menu-hero-float { animation: none; }
+    }
+    #btn-start .menu-play-pulse-img {
+      animation: menu-play-pulse 1.95s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+      transform-origin: center center;
+    }
+    #btn-start {
+      transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease;
+    }
+    #btn-start:hover {
+      transform: translateY(-1px) scale(1.015);
+    }
+    @keyframes menu-play-pulse {
+      0%, 100% {
+        transform: scale(1) translateY(0);
+        filter: drop-shadow(0 8px 26px rgba(0, 0, 0, 0.52));
+      }
+      50% {
+        transform: scale(1.045) translateY(-1px);
+        filter: drop-shadow(0 14px 34px rgba(255, 125, 62, 0.3));
+      }
+    }
+    /* Level end: fullscreen video + semi-opaque black + yellow-red warm tint (revealed in JS) */
+    #level1-end-overlay .level1-end-fill {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      min-height: 100%;
+    }
+    #level1-end-overlay #level1-end-video {
+      opacity: 0;
+      transition: opacity 7.5s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    #level1-end-overlay.level1-end--revealed #level1-end-video {
+      opacity: 0.88;
+    }
+    #level1-end-tint {
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 8s cubic-bezier(0.22, 1, 0.36, 1) 0.2s;
+      background:
+        linear-gradient(
+          180deg,
+          rgba(0, 0, 0, 0.32) 0%,
+          rgba(38, 10, 8, 0.48) 45%,
+          rgba(0, 0, 0, 0.58) 100%
+        ),
+        linear-gradient(
+          118deg,
+          rgba(255, 218, 150, 0.14) 0%,
+          rgba(255, 120, 88, 0.07) 36%,
+          transparent 58%
+        ),
+        linear-gradient(
+          305deg,
+          transparent 34%,
+          rgba(200, 52, 38, 0.16) 90%,
+          rgba(95, 18, 12, 0.12) 100%
+        );
+    }
+    #level1-end-overlay.level1-end--revealed #level1-end-tint {
+      opacity: 0.42;
+    }
+    #level1-end-overlay .level1-end-copy {
+      opacity: 0;
+      transform: translate3d(0, 16px, 0);
+      transition:
+        opacity 6.85s ease-out 5.15s,
+        transform 7s cubic-bezier(0.22, 1, 0.36, 1) 5s;
+      text-shadow: 0 2px 28px rgba(0, 0, 0, 0.92), 0 1px 2px rgba(0, 0, 0, 0.8);
+    }
+    #level1-end-overlay.level1-end--revealed .level1-end-copy {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./node_modules/three/build/three.module.js",
+      "three/addons/": "./node_modules/three/examples/jsm/",
+      "cannon-es": "./node_modules/cannon-es/dist/cannon-es.js"
+    }
+  }
+  </script>
+</head>
+<body class="text-white antialiased">
+  <div id="game-letterbox">
+    <div id="game-9-16" class="bg-dusk-bg">
+      <canvas id="game-canvas"></canvas>
+
+  <!-- HUD -->
+  <div id="hud" class="pointer-events-none absolute inset-0 z-10 hidden">
+    <div id="hud-coins-row" class="absolute left-3 top-3 flex items-center gap-2 rounded-2xl bg-dusk-panel/75 px-3 py-2 shadow-[0_8px_32px_rgba(232,93,76,0.12)] backdrop-blur-sm">
+      <span class="text-dusk-gold text-lg" aria-hidden="true">◎</span>
+      <span id="hud-coins" class="font-mono text-sm tracking-wide text-dusk-gold">0</span>
+    </div>
+    <div class="absolute left-1/2 top-3 -translate-x-1/2 rounded-2xl bg-dusk-panel/75 px-4 py-2 text-center shadow-[0_8px_32px_rgba(0,0,0,0.25)] backdrop-blur-sm">
+      <div class="text-[10px] uppercase tracking-[0.2em] text-white/50">Score</div>
+      <div id="hud-score" class="font-mono text-lg text-white">0</div>
+      <div id="hud-distance" class="font-mono text-xs text-dusk-gold/90">0 m</div>
+    </div>
+    <div class="absolute right-3 top-3 flex items-center gap-1 rounded-2xl bg-dusk-panel/75 px-3 py-2 shadow-[0_8px_32px_rgba(0,0,0,0.25)] backdrop-blur-sm" id="hud-hearts" aria-label="Lives"></div>
+    <button
+      type="button"
+      id="btn-game-settings"
+      class="pointer-events-auto absolute top-[max(1rem,env(safe-area-inset-top))] left-[max(1rem,env(safe-area-inset-left))] z-[15] flex h-12 min-h-[44px] w-12 items-center justify-center rounded-2xl border border-white/15 bg-[#2c2438]/80 text-lg text-[#f0c14d] shadow-[0_10px_28px_rgba(0,0,0,0.35)] backdrop-blur-sm touch-btn"
+      aria-label="Pause and settings"
+      title="Pause"
+    >
+      ⚙
+    </button>
+  </div>
+
+  <!-- Touch: 1-hand = direction + shoot, bottom-right · 2-hand = direction BL, shoot BR -->
+  <div id="touch-layer" class="pointer-events-none absolute inset-0 z-20 hidden">
+    <div
+      id="touch-panel-1h"
+      class="pointer-events-auto absolute bottom-[max(1rem,env(safe-area-inset-bottom))] right-[max(1rem,env(safe-area-inset-right))] flex w-[min(13.5rem,calc(100%-1.5rem))] flex-col items-stretch gap-2 rounded-3xl bg-[#2c2438]/40 p-3 shadow-[0_12px_40px_rgba(0,0,0,0.28)] backdrop-blur-sm"
+      aria-label="One hand — direction and shooting (bottom right)"
+    >
+      <p class="pointer-events-none mb-0.5 text-center text-[9px] font-semibold uppercase tracking-[0.18em] text-white/40">Direction · Shoot</p>
+      <div class="flex justify-center gap-2">
+        <button type="button" id="btn-lane-left-1h" class="touch-btn h-[52px] min-h-[48px] flex-1 rounded-2xl bg-dusk-panel/85 text-dusk-gold text-2xl font-bold shadow-[0_6px_20px_rgba(0,0,0,0.35)]" aria-label="Lane left">◀</button>
+        <button type="button" id="btn-lane-right-1h" class="touch-btn h-[52px] min-h-[48px] flex-1 rounded-2xl bg-dusk-panel/85 text-dusk-gold text-2xl font-bold shadow-[0_6px_20px_rgba(0,0,0,0.35)]" aria-label="Lane right">▶</button>
+      </div>
+      <div class="flex justify-center gap-2">
+        <button type="button" id="btn-banana-1h" class="touch-btn h-[76px] min-h-[72px] flex-1 rounded-2xl bg-gradient-to-b from-[#e8c840] to-[#b89420] text-2xl shadow-[0_10px_28px_rgba(232,200,64,0.35)]" aria-label="Banana from Ceez">🍌</button>
+        <button type="button" id="btn-seeds-1h" class="touch-btn h-[76px] min-h-[72px] flex-1 rounded-2xl bg-gradient-to-b from-[#c44a4a] to-[#8a2a2a] text-xs font-semibold leading-tight text-white shadow-[0_10px_28px_rgba(196,74,74,0.35)]" aria-label="Bird seeds from Ray">Seeds</button>
+      </div>
+    </div>
+
+    <div id="touch-panel-2h" class="pointer-events-none absolute inset-0 hidden">
+      <div
+        class="pointer-events-auto absolute bottom-[max(1rem,env(safe-area-inset-bottom))] left-[max(4.25rem,env(safe-area-inset-left)+3.25rem)] flex w-[min(11rem,calc(50%-1rem))] flex-col gap-2 rounded-3xl bg-[#2c2438]/40 p-3 shadow-[0_12px_40px_rgba(0,0,0,0.28)] backdrop-blur-sm"
+        aria-label="Direction — bottom left (right of pause)"
+      >
+        <p class="pointer-events-none mb-0.5 text-center text-[9px] font-semibold uppercase tracking-[0.18em] text-white/40">Direction</p>
+        <div class="flex gap-2">
+          <button type="button" id="btn-lane-left-2h" class="touch-btn h-16 min-h-[56px] flex-1 rounded-2xl bg-dusk-panel/85 text-dusk-gold text-3xl font-bold shadow-[0_6px_20px_rgba(0,0,0,0.35)]" aria-label="Lane left">◀</button>
+          <button type="button" id="btn-lane-right-2h" class="touch-btn h-16 min-h-[56px] flex-1 rounded-2xl bg-dusk-panel/85 text-dusk-gold text-3xl font-bold shadow-[0_6px_20px_rgba(0,0,0,0.35)]" aria-label="Lane right">▶</button>
+        </div>
+      </div>
+      <div
+        class="pointer-events-auto absolute bottom-[max(1rem,env(safe-area-inset-bottom))] right-[max(1rem,env(safe-area-inset-right))] flex w-[min(13.5rem,calc(50%-1rem))] flex-col gap-2 rounded-3xl bg-[#2c2438]/40 p-3 shadow-[0_12px_40px_rgba(0,0,0,0.28)] backdrop-blur-sm"
+        aria-label="Shoot — bottom right"
+      >
+        <p class="pointer-events-none mb-0.5 text-center text-[9px] font-semibold uppercase tracking-[0.18em] text-white/40">Banana · Seeds</p>
+        <div class="flex gap-2">
+          <button type="button" id="btn-banana-2h" class="touch-btn h-[76px] min-h-[72px] flex-1 rounded-2xl bg-gradient-to-b from-[#e8c840] to-[#b89420] text-2xl shadow-[0_10px_28px_rgba(232,200,64,0.35)]" aria-label="Banana from Ceez">🍌</button>
+          <button type="button" id="btn-seeds-2h" class="touch-btn h-[76px] min-h-[72px] flex-1 rounded-2xl bg-gradient-to-b from-[#c44a4a] to-[#8a2a2a] text-xs font-semibold leading-tight text-white shadow-[0_10px_28px_rgba(196,74,74,0.35)]" aria-label="Bird seeds from Ray">Seeds</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- In-run pause — after touch layer so it captures input on top -->
+  <div
+    id="game-pause-overlay"
+    class="absolute inset-0 z-[45] hidden flex flex-col items-center justify-center px-5"
+    aria-hidden="true"
+  >
+    <div id="game-pause-backdrop" class="pointer-events-auto absolute inset-0 bg-black/35 backdrop-blur-[2px]"></div>
+    <div
+      class="pointer-events-auto relative z-10 w-full max-w-[19rem] rounded-2xl border border-white/14 bg-[#140e1f]/95 p-4 shadow-[0_24px_70px_rgba(0,0,0,0.65)]"
+      role="dialog"
+      aria-labelledby="game-pause-title"
+    >
+      <p id="game-pause-title" class="text-center text-xs font-semibold uppercase tracking-[0.2em] text-white/55">Paused</p>
+      <p class="mt-1 text-center text-sm text-white/75">Adjust quick options or resume your run.</p>
+      <div class="mt-3 grid grid-cols-2 gap-2">
+        <button type="button" id="game-pause-sound-on" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">Sound On</button>
+        <button type="button" id="game-pause-sound-off" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">Sound Off</button>
+        <button type="button" id="game-pause-music-on" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">Music On</button>
+        <button type="button" id="game-pause-music-off" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">Music Off</button>
+      </div>
+      <p class="mt-2 text-center text-[10px] uppercase tracking-[0.14em] text-white/45">Play mode</p>
+      <div class="mt-1.5 grid grid-cols-3 gap-2">
+        <button type="button" id="game-pause-mode-1h" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-1.5 py-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-white/85">1H</button>
+        <button type="button" id="game-pause-mode-2h" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-1.5 py-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-white/85">2H</button>
+        <button type="button" id="game-pause-mode-kb" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-1.5 py-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-white/85">KB</button>
+      </div>
+      <button
+        type="button"
+        id="game-pause-try-again"
+        class="touch-btn mt-4 w-full rounded-xl border border-white/20 bg-white/10 px-4 py-2.5 text-xs font-bold uppercase tracking-[0.14em] text-white/90 shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
+      >
+        Try Again
+      </button>
+      <button
+        type="button"
+        id="game-pause-resume"
+        class="touch-btn mt-2 w-full rounded-xl border border-[#f6dd8a]/45 bg-[radial-gradient(circle_at_50%_20%,#fff1b0_0%,#f1c94f_34%,#c98f1f_72%,#8a5f11_100%)] px-4 py-3 text-sm font-extrabold uppercase tracking-[0.12em] text-[#1f2f13] shadow-[0_12px_30px_rgba(227,171,52,0.35)]"
+      >
+        Resume
+      </button>
+    </div>
+  </div>
+
+  <!-- Game over — three lives lost (or pit); separate from level-complete video -->
+  <div
+    id="game-over-overlay"
+    class="pointer-events-none absolute inset-0 z-[58] hidden flex-col items-center justify-center gap-4 bg-black px-6 backdrop-blur-md"
+    aria-hidden="true"
+    role="dialog"
+    aria-labelledby="game-over-title"
+  >
+    <img
+      src="./ui/ceez-game-over-emblem.png"
+      alt="Ceez game over emblem"
+      class="h-auto w-[min(42cqw,10.5rem)] object-contain drop-shadow-[0_8px_28px_rgba(0,0,0,0.6)]"
+      decoding="async"
+    />
+    <h2 id="game-over-title" class="text-center font-black uppercase tracking-[0.12em] text-white drop-shadow-[0_4px_24px_rgba(232,93,76,0.35)]" style="font-size: clamp(1.75rem, 6cqw, 2.25rem);">
+      Game over
+    </h2>
+    <p id="game-over-score-line" class="max-w-[min(100%,22rem)] text-center font-mono text-sm leading-relaxed text-white/85"></p>
+    <button
+      type="button"
+      id="btn-game-over-menu"
+      class="touch-btn mt-2 min-w-[12rem] rounded-xl border border-[#f6dd8a]/45 bg-[radial-gradient(circle_at_50%_20%,#fff1b0_0%,#f1c94f_34%,#c98f1f_72%,#8a5f11_100%)] px-6 py-3 text-sm font-extrabold uppercase tracking-[0.12em] text-[#1f2f13] shadow-[0_12px_30px_rgba(227,171,52,0.35)]"
+    >
+      Main menu
+    </button>
+  </div>
+
+  <!-- Level 1 complete: fullscreen video + black / warm tint overlay + totals -->
+  <div id="level1-end-overlay" class="pointer-events-auto absolute inset-0 z-[62] hidden" aria-hidden="true" role="dialog" aria-label="Level complete">
+    <div class="level1-end-fill bg-black">
+      <video
+        id="level1-end-video"
+        class="absolute inset-0 z-0 h-full w-full object-cover"
+        playsinline
+        muted
+        preload="metadata"
+      ></video>
+      <div id="level1-end-tint" aria-hidden="true"></div>
+      <div
+        class="level1-end-copy pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-end px-4 pb-[max(2.25rem,env(safe-area-inset-bottom))] pt-20 text-center"
+      >
+        <p class="text-[10px] font-semibold uppercase tracking-[0.22em] text-[#ffd9a8]/95">Level 1 complete</p>
+        <p id="level1-end-totals" class="mt-3 max-w-[min(100%,22rem)] font-mono text-sm leading-relaxed text-[#fff5ec]"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Menu (front page only — rooftop BG, logo, hero, PLAY!) -->
+  <div id="screen-menu" class="absolute inset-0 z-30 flex flex-col overflow-hidden">
+    <div class="pointer-events-none absolute inset-0 bg-[url('ui/menu-bg.png')] bg-cover bg-center" aria-hidden="true"></div>
+    <div class="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/35 via-black/10 to-black/75" aria-hidden="true"></div>
+    <div class="menu-depth-glow" aria-hidden="true"></div>
+    <div class="menu-orb menu-orb-a" aria-hidden="true"></div>
+    <div class="menu-orb menu-orb-b" aria-hidden="true"></div>
+    <div
+      class="menu-stage relative z-10 flex min-h-full flex-col px-4 pt-[max(0.5rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] sm:px-6"
+    >
+      <p id="menu-subtitle" class="sr-only" aria-live="polite"></p>
+
+      <!-- Hero (large, z-30) overlaps logo (z-10) -->
+      <div class="relative flex min-h-0 w-full flex-1 flex-col items-center pt-2">
+        <div class="menu-logo-wrap relative z-10 flex w-full shrink-0 justify-center px-2">
+          <div class="menu-logo-block">
+            <img
+              src="ui/menu-logo.png"
+              alt="Sky Hustle"
+              width="520"
+              height="280"
+              class="relative z-10 h-auto w-[min(100cqw,720px)] object-contain drop-shadow-[0_12px_40px_rgba(0,0,0,0.72)] [filter:drop-shadow(0_0_18px_rgba(255,255,255,0.18))_drop-shadow(0_12px_40px_rgba(0,0,0,0.72))]"
+              decoding="async"
+            />
+            <div class="menu-logo-shine" aria-hidden="true"></div>
+          </div>
+        </div>
+
+        <div class="pointer-events-none relative z-30 -mt-[clamp(6.4rem,28cqw,13rem)] flex w-full flex-1 flex-col items-center justify-end -translate-y-[85px]">
+          <img
+            src="ui/menu-hero.png"
+            alt=""
+            width="800"
+            height="1200"
+            class="menu-hero-float max-h-[min(calc(88cqh+100px),calc(64rem+100px))] w-auto max-w-[min(calc(150cqw+(100px*2/3)),calc(60rem+(100px*2/3)))] object-contain object-bottom drop-shadow-[0_22px_64px_rgba(0,0,0,0.62)]"
+            decoding="async"
+            role="presentation"
+          />
+        </div>
+      </div>
+
+      <div class="relative z-50 mx-auto flex w-full max-w-md shrink-0 flex-col items-center gap-2 pt-4 pointer-events-auto">
+        <button
+          type="button"
+          id="btn-start"
+          class="touch-btn mt-3 min-w-[min(62cqw,16.5rem)] rounded-2xl border border-[#f6dd8a]/45 bg-[radial-gradient(circle_at_50%_20%,#fff1b0_0%,#f1c94f_34%,#c98f1f_72%,#8a5f11_100%)] px-6 py-3 shadow-[0_14px_34px_rgba(227,171,52,0.36),inset_0_1px_0_rgba(255,245,193,0.75),inset_0_-2px_0_rgba(95,62,10,0.4)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#f0c14d]"
+          aria-label="Play"
+        >
+          <span class="menu-play-pulse-img block text-[1.7rem] font-extrabold uppercase leading-none tracking-[0.14em] text-[#1f2f13] drop-shadow-[0_1px_0_rgba(255,243,188,0.6)] sm:text-[1.95rem]">
+            Play
+          </span>
+        </button>
+
+        <p id="high-score-line" class="hidden font-mono text-sm text-[#f0c14d]/90 drop-shadow-md">Best: 0</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pre-Level (between cover and Level 1) -->
+  <div id="screen-prelevel" class="absolute inset-0 z-30 hidden flex flex-col overflow-hidden">
+    <div class="pointer-events-none absolute inset-0 bg-[url('ui/menu-bg.png')] bg-cover bg-center" aria-hidden="true"></div>
+    <div class="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/45 via-black/35 to-black/80" aria-hidden="true"></div>
+    <div class="relative z-10 flex min-h-full flex-col items-center justify-center px-5 py-6">
+      <div class="w-full max-w-[22rem] rounded-[2rem] border border-white/10 bg-[#140e1f]/80 p-5 shadow-[0_20px_60px_rgba(0,0,0,0.55)] backdrop-blur-md">
+        <div class="mb-4 flex items-center justify-center">
+          <img
+            src="ui/menu-logo.png"
+            alt="Sky Hustle"
+            width="420"
+            height="226"
+            class="h-auto w-[min(76cqw,16rem)] object-contain drop-shadow-[0_8px_28px_rgba(0,0,0,0.6)]"
+            decoding="async"
+          />
+        </div>
+        <p class="text-center text-[11px] uppercase tracking-[0.2em] text-white/55">Level 1 Briefing</p>
+        <p class="mt-1 text-center text-sm text-white/75">Enter your name before you drop in.</p>
+
+        <input
+          id="player-name-input"
+          type="text"
+          maxlength="18"
+          placeholder="Enter your name"
+          class="mt-2 w-full rounded-xl border border-white/20 bg-black/25 px-3 py-2.5 text-sm font-semibold text-white placeholder:text-white/35 focus:border-[#f0c14d] focus:outline-none focus:ring-2 focus:ring-[#f0c14d]/45"
+        />
+
+        <div class="mt-4 grid grid-cols-2 gap-2.5">
+          <button type="button" id="btn-prelevel-highscore" class="touch-btn rounded-xl border border-[#f0c14d]/55 bg-[#2c1f3f]/80 px-3 py-2 text-xs font-semibold uppercase tracking-[0.1em] text-[#f0c14d] shadow-[0_10px_26px_rgba(0,0,0,0.38)]">High Score</button>
+          <button type="button" id="btn-prelevel-settings" class="touch-btn rounded-xl border border-white/20 bg-[#20172e]/85 px-3 py-2 text-xs font-semibold uppercase tracking-[0.1em] text-white/90 shadow-[0_10px_26px_rgba(0,0,0,0.38)]">Settings</button>
+        </div>
+        <div class="mt-3 rounded-xl bg-black/25 px-3 py-2.5">
+          <p id="prelevel-best-line" class="text-center text-sm font-extrabold tracking-[0.01em] text-white">Best High Score: 0</p>
+          <p id="prelevel-settings-line" class="mt-1 text-center text-[11px] text-white/70">Controller: 1 Hand · Sound: On · Music: On</p>
+        </div>
+        <p id="prelevel-meta" class="mt-2 min-h-[1.25rem] text-center text-xs text-white/60"></p>
+
+        <button
+          type="button"
+          id="btn-enter-level1"
+          class="touch-btn mt-2 w-full rounded-2xl border border-[#f6dd8a]/45 bg-[radial-gradient(circle_at_50%_20%,#fff1b0_0%,#f1c94f_34%,#c98f1f_72%,#8a5f11_100%)] px-4 py-3 text-sm font-extrabold uppercase tracking-[0.16em] text-[#1f2f13] shadow-[0_14px_34px_rgba(227,171,52,0.36),inset_0_1px_0_rgba(255,245,193,0.75),inset_0_-2px_0_rgba(95,62,10,0.4)] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Enter Level 1
+        </button>
+      </div>
+    </div>
+    <div id="prelevel-settings-modal" class="absolute inset-0 z-20 hidden items-center justify-center px-5">
+      <div id="prelevel-settings-backdrop" class="absolute inset-0 bg-black/35 backdrop-blur-[2px]"></div>
+      <div class="relative z-10 w-full max-w-[20rem] rounded-2xl border border-white/16 bg-[#170f24]/95 p-4 shadow-[0_20px_65px_rgba(0,0,0,0.6)]">
+        <div class="mb-3 flex items-center justify-between">
+          <p class="text-xs font-semibold uppercase tracking-[0.16em] text-white/70">Settings</p>
+          <button type="button" id="btn-prelevel-settings-close" class="touch-btn rounded-lg border border-white/15 bg-white/5 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-white/80">Close</button>
+        </div>
+        <div class="mb-2">
+          <p class="text-[10px] font-semibold uppercase tracking-[0.14em] text-white/55">Play Mode</p>
+          <div class="mt-1.5 grid grid-cols-3 gap-2">
+            <button type="button" id="setting-mode-1h" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2.5 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">1 Hand</button>
+            <button type="button" id="setting-mode-2h" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2.5 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">2 Hand</button>
+            <button type="button" id="setting-mode-kb" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2.5 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">Keyboard</button>
+          </div>
+        </div>
+        <div class="mb-2">
+          <p class="text-[10px] font-semibold uppercase tracking-[0.14em] text-white/55">Sound</p>
+          <div class="mt-1.5 grid grid-cols-2 gap-2">
+            <button type="button" id="setting-sound-on" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2.5 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">On</button>
+            <button type="button" id="setting-sound-off" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2.5 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">Off</button>
+          </div>
+        </div>
+        <div>
+          <p class="text-[10px] font-semibold uppercase tracking-[0.14em] text-white/55">Music</p>
+          <div class="mt-1.5 grid grid-cols-2 gap-2">
+            <button type="button" id="setting-music-on" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2.5 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">On</button>
+            <button type="button" id="setting-music-off" class="touch-btn rounded-lg border border-white/18 bg-white/5 px-2.5 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/85">Off</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+    </div>
+  </div>
+
+  <script type="module" src="./js/game.js"></script>
+</body>
+</html>
