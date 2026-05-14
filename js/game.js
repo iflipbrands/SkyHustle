@@ -101,6 +101,8 @@ const CAMERA_DIST_BACK = 4.35;
 const CAMERA_HEIGHT = 2.12;
 const CAMERA_LOOK_AHEAD = 8.8;
 const CAMERA_LOOK_HEIGHT_OFFSET = 0.64;
+/** Chase cam eases behind heading after hard turns (0–1 per frame; higher = snappier). */
+const CAMERA_BEHIND_SMOOTH = 0.2;
 
 const CEEZ_OBJ_DIR = `${DIR_CHAR}Ceez/`;
 const CEEZ_OBJ_FILE = "ceez.obj";
@@ -257,6 +259,8 @@ let rayMesh = null;
 const lastRunForward = new THREE.Vector3(0, 0, 1);
 const _camBehind = new THREE.Vector3();
 const _camLook = new THREE.Vector3();
+/** Camera-only smoothed run forward — eases behind the character when heading snaps 90°. */
+const cameraSmoothedForward = new THREE.Vector3(0, 0, 1);
 /** World Y rotation of the run (radians). 0 = forward +world Z; +π/2 = forward +world X. */
 let worldRunYaw = 0;
 /** XZ origin for lane offsets: lateral = dot(P − runOrigin, runRight). Updated on 90° turns. */
@@ -303,8 +307,6 @@ let visibleRunwayPlane = null;
 let neighbourhoodWideGroundBody = null;
 /** Imported modular neighbourhood (visible after {@link buildNeighbourhoodWorld}). */
 let neighbourhoodWorldGroup = null;
-/** In keyboard control mode, forward +Z run while Arrow Up or W is held. */
-let kbRunForwardHeld = false;
 /** @type {HTMLAudioElement | null} */
 let gameMusicEl = null;
 
@@ -1613,7 +1615,6 @@ function openGamePausePanel() {
   if (state !== "playing") return;
   if (level1VictoryFreeze || level1EndCinematicStarted) return;
   runPaused = true;
-  kbRunForwardHeld = false;
   playerBody.velocity.x = 0;
   playerBody.velocity.z = 0;
   gamePauseOverlay?.classList.remove("hidden");
@@ -1652,14 +1653,20 @@ function updateHeartsDom() {
 
 function updateCamera() {
   if (!playerRoot) return;
+  cameraSmoothedForward.lerp(lastRunForward, CAMERA_BEHIND_SMOOTH);
+  if (cameraSmoothedForward.lengthSq() < 1e-8) {
+    cameraSmoothedForward.copy(lastRunForward);
+  } else {
+    cameraSmoothedForward.normalize();
+  }
   const p = playerRoot.position;
   const distBack = CAMERA_DIST_BACK;
   const camH = CAMERA_HEIGHT;
   const lookAhead = CAMERA_LOOK_AHEAD;
   const lookYOffset = CAMERA_LOOK_HEIGHT_OFFSET;
-  _camBehind.copy(lastRunForward).multiplyScalar(-distBack);
+  _camBehind.copy(cameraSmoothedForward).multiplyScalar(-distBack);
   camera.position.set(p.x + _camBehind.x, p.y + camH, p.z + _camBehind.z);
-  _camLook.copy(p).addScaledVector(lastRunForward, lookAhead);
+  _camLook.copy(p).addScaledVector(cameraSmoothedForward, lookAhead);
   _camLook.y += lookYOffset;
   camera.lookAt(_camLook);
 }
@@ -3050,7 +3057,6 @@ function syncPlayerMesh(dt) {
 
 function resetRun() {
   rng = mulberry32((Math.random() * 0xffffffff) >>> 0);
-  kbRunForwardHeld = false;
   applyNeighbourhoodRunStartState();
   laneIndex = 1;
   laneNavLastLeftMs = 0;
@@ -3060,6 +3066,7 @@ function resetRun() {
   runOrigin.set(0, 0, 0);
   updateRunBasisVectors();
   lastRunForward.copy(_runForward);
+  cameraSmoothedForward.copy(_runForward);
   runDistanceTraveledM = RUN_START_Z;
   coins = 0;
   lives = 3;
@@ -3128,7 +3135,6 @@ async function startGame() {
 function returnToMainMenuFromRun(bestCandidateScore) {
   if (state !== "playing" && state !== "gameOver") return;
   closeGamePausePanel();
-  kbRunForwardHeld = false;
   const hi = readHighScore();
   if (bestCandidateScore > hi) writeHighScore(bestCandidateScore);
   if (highScoreLine) {
@@ -3229,15 +3235,11 @@ function stepPlaying(dt) {
     const latErr = latTarget - lat;
     const vR_desired = latErr * LANE_SMOOTH;
     const blocked = level1VictoryFreeze;
-    const kbMode = getControlMode() === "kb";
-    const forward = !kbMode || kbRunForwardHeld;
-    const vF_desired = blocked ? 0 : forward ? FORWARD_SPEED : 0;
+    const vF_desired = blocked ? 0 : FORWARD_SPEED;
     if (!blocked) {
       playerBody.velocity.x = F.x * vF_desired + R.x * vR_desired;
       playerBody.velocity.z = F.z * vF_desired + R.z * vR_desired;
-      if (forward) {
-        runDistanceTraveledM += FORWARD_SPEED * dt;
-      }
+      runDistanceTraveledM += FORWARD_SPEED * dt;
     } else {
       playerBody.velocity.x = 0;
       playerBody.velocity.z = 0;
@@ -3488,32 +3490,61 @@ function bindUi() {
         !runPaused &&
         !level1VictoryFreeze &&
         !level1EndCinematicStarted &&
+        getControlMode() === "kb" &&
         (e.code === "ArrowUp" || e.code === "KeyW")
       ) {
         e.preventDefault();
-        kbRunForwardHeld = true;
+        return;
       }
       if (state !== "playing" || runPaused) return;
       if (level1VictoryFreeze || level1EndCinematicStarted) return;
-      if (e.code === "KeyA" || e.code === "ArrowLeft" || e.code === "KeyQ") {
-        if (e.repeat) return;
-        e.preventDefault();
-        if (e.shiftKey) {
+      const kbKeys = getControlMode() === "kb";
+      if (kbKeys) {
+        if (e.code === "KeyZ") {
+          if (e.repeat) return;
+          e.preventDefault();
+          laneLeft();
+          return;
+        }
+        if (e.code === "KeyC") {
+          if (e.repeat) return;
+          e.preventDefault();
+          laneRight();
+          return;
+        }
+        if (e.code === "ArrowLeft") {
+          if (e.repeat) return;
+          e.preventDefault();
           turnRunWorldLeft();
-        } else {
-          tryNavigateLaneOrTurnLeft();
+          return;
         }
-        return;
-      }
-      if (e.code === "KeyD" || e.code === "ArrowRight" || e.code === "KeyE") {
-        if (e.repeat) return;
-        e.preventDefault();
-        if (e.shiftKey) {
+        if (e.code === "ArrowRight") {
+          if (e.repeat) return;
+          e.preventDefault();
           turnRunWorldRight();
-        } else {
-          tryNavigateLaneOrTurnRight();
+          return;
         }
-        return;
+      } else {
+        if (e.code === "KeyA" || e.code === "ArrowLeft" || e.code === "KeyQ") {
+          if (e.repeat) return;
+          e.preventDefault();
+          if (e.shiftKey) {
+            turnRunWorldLeft();
+          } else {
+            tryNavigateLaneOrTurnLeft();
+          }
+          return;
+        }
+        if (e.code === "KeyD" || e.code === "ArrowRight" || e.code === "KeyE") {
+          if (e.repeat) return;
+          e.preventDefault();
+          if (e.shiftKey) {
+            turnRunWorldRight();
+          } else {
+            tryNavigateLaneOrTurnRight();
+          }
+          return;
+        }
       }
       if (e.code === "Space" || e.key === " ") {
         if (e.repeat) return;
@@ -3541,16 +3572,6 @@ function bindUi() {
     },
     true
   );
-  window.addEventListener(
-    "keyup",
-    (e) => {
-      if (e.code === "ArrowUp" || e.code === "KeyW") kbRunForwardHeld = false;
-    },
-    true
-  );
-  window.addEventListener("blur", () => {
-    kbRunForwardHeld = false;
-  });
 }
 
 async function bootstrap() {
