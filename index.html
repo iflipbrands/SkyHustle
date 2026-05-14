@@ -434,7 +434,7 @@
     >
       <p id="game-pause-title" class="text-center text-xs font-semibold uppercase tracking-[0.2em] text-white/55">Paused</p>
       <p class="mt-1.5 text-center text-[10px] leading-snug text-white/50">
-        <span class="font-semibold text-white/60">Keyboard (KB)</span>: Z / C = lanes · ← / → = 90° turns · Space = jump · ↓ = throw · ↑ / W = off (auto-run).
+        <span class="font-semibold text-white/60">Keyboard (KB)</span>: Z / C = lanes · hold ← / → to curve · quick second tap on ← / → then hold for a sharp 90° · Space = jump · ↓ = throw · ↑ / W off.
         <span class="block mt-1 text-white/45">1H / 2H on keyboard: A D or ← → (double-tap or Shift = corner), Space, ↓.</span>
       </p>
       <p class="mt-1 text-center text-sm text-white/75">Adjust quick options or resume your run.</p>
@@ -526,6 +526,22 @@
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div
+    id="world-loading-overlay"
+    class="pointer-events-auto absolute inset-0 z-[100] hidden flex-col items-center justify-center gap-3 bg-[#0d0814]/92 px-6 text-center backdrop-blur-sm"
+    aria-live="polite"
+    aria-busy="false"
+    role="status"
+  >
+    <p class="text-sm font-semibold uppercase tracking-[0.22em] text-white/75">Loading world</p>
+    <p class="max-w-[17rem] text-xs leading-relaxed text-white/50">
+      Pulling in the neighbourhood — large downloads can take a moment on first visit.
+    </p>
+    <div class="h-1.5 w-44 overflow-hidden rounded-full bg-white/12" aria-hidden="true">
+      <div class="h-full w-2/5 animate-pulse rounded-full bg-[#f0c14d]/85"></div>
     </div>
   </div>
 

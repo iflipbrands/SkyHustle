@@ -103,6 +103,14 @@ const CAMERA_LOOK_AHEAD = 8.8;
 const CAMERA_LOOK_HEIGHT_OFFSET = 0.64;
 /** Chase cam eases behind heading after hard turns (0–1 per frame; higher = snappier). */
 const CAMERA_BEHIND_SMOOTH = 0.2;
+/** KB: hold ←/→ to curve (small yaw) without a 90° corner. */
+const KB_ARROW_SOFT_RATE = 1.05;
+const KB_ARROW_STEER_MAX = 0.44;
+const KB_ARROW_STEER_DECAY = 3.2;
+/** KB: after a quick second tap on ←/→, hold to snap a hard 90°. */
+const KB_HARD_TURN_RATE = 3.05;
+/** Max ms between tap release and next tap to count as double-tap (arms hard corner). */
+const KB_ARROW_DBL_MS = 340;
 
 const CEEZ_OBJ_DIR = `${DIR_CHAR}Ceez/`;
 const CEEZ_OBJ_FILE = "ceez.obj";
@@ -178,6 +186,7 @@ const _rayWorld = new THREE.Vector3();
 const SEED_BURST_COUNT = 7;
 
 const canvas = document.getElementById("game-canvas");
+const worldLoadingOverlay = document.getElementById("world-loading-overlay");
 /** So keyboard reaches the game instead of staying on a hidden input or menu control. */
 if (canvas) {
   canvas.tabIndex = 0;
@@ -261,8 +270,12 @@ const _camBehind = new THREE.Vector3();
 const _camLook = new THREE.Vector3();
 /** Camera-only smoothed run forward — eases behind the character when heading snaps 90°. */
 const cameraSmoothedForward = new THREE.Vector3(0, 0, 1);
-/** World Y rotation of the run (radians). 0 = forward +world Z; +π/2 = forward +world X. */
+/** World Y rotation of the run (radians). 0 = forward +world Z; +π/2 = forward +world X. Derived from committed + steer. */
 let worldRunYaw = 0;
+/** Cardinal heading (multiples of π/2 after snaps); {@link yawSteer} adds soft carve in KB mode. */
+let committedRunYaw = 0;
+/** Soft carve offset (radians), clamped ±{@link KB_ARROW_STEER_MAX}. */
+let yawSteer = 0;
 /** XZ origin for lane offsets: lateral = dot(P − runOrigin, runRight). Updated on 90° turns. */
 const runOrigin = new THREE.Vector3(0, 0, 0);
 const _runForward = new THREE.Vector3(0, 0, 1);
@@ -328,6 +341,16 @@ let laneIndex = 1;
 let laneNavLastLeftMs = 0;
 let laneNavLastRightMs = 0;
 let lastWorldRunTurnAtMs = 0;
+/** KB (only): arrow hold state + double-tap hard corner. */
+let kbArrowLeftDown = false;
+let kbArrowRightDown = false;
+let kbLeftPrevUpMs = 0;
+let kbRightPrevUpMs = 0;
+/** 0 = none, 1 = hard left in progress, −1 = hard right. */
+let kbHardTurnDir = 0;
+let kbHardTargetYaw = 0;
+/** @type {Promise<void> | null} */
+let neighbourhoodLoadPromise = null;
 let coins = 0;
 let lives = 3;
 let invincibleUntil = 0;
@@ -1501,6 +1524,20 @@ function setPrelevelMeta(message) {
   prelevelMeta.textContent = message || "";
 }
 
+function showWorldLoadingOverlay() {
+  if (!worldLoadingOverlay) return;
+  worldLoadingOverlay.classList.remove("hidden");
+  worldLoadingOverlay.classList.add("flex");
+  worldLoadingOverlay.setAttribute("aria-busy", "true");
+}
+
+function hideWorldLoadingOverlay() {
+  if (!worldLoadingOverlay) return;
+  worldLoadingOverlay.classList.add("hidden");
+  worldLoadingOverlay.classList.remove("flex");
+  worldLoadingOverlay.setAttribute("aria-busy", "false");
+}
+
 function getPrelevelNameTrimmed() {
   return String(playerNameInput?.value || "").trim();
 }
@@ -1512,17 +1549,23 @@ function syncEnterLevel1Button() {
   btnEnterLevel1.setAttribute("aria-disabled", "false");
 }
 
-function tryEnterLevelFromPrelevel() {
+async function tryEnterLevelFromPrelevel() {
   const typed = getPrelevelNameTrimmed();
   const saved = readPlayerName();
   const name = typed || saved || "Player";
   writePlayerName(name);
   if (playerNameInput && !typed) playerNameInput.value = name;
-  setPrelevelMeta("");
-  Promise.resolve(startGame()).catch((err) => {
+  showWorldLoadingOverlay();
+  try {
+    await ensureNeighbourhoodWorldLoaded();
+    setPrelevelMeta("");
+    await startGame();
+  } catch (err) {
     console.error("[Sky Hustle] startGame failed from prelevel", err);
     setPrelevelMeta(`Start failed: ${err?.message || err}`);
-  });
+  } finally {
+    hideWorldLoadingOverlay();
+  }
 }
 
 function showPreLevel() {
@@ -1615,6 +1658,7 @@ function openGamePausePanel() {
   if (state !== "playing") return;
   if (level1VictoryFreeze || level1EndCinematicStarted) return;
   runPaused = true;
+  resetKbSteeringState();
   playerBody.velocity.x = 0;
   playerBody.velocity.z = 0;
   gamePauseOverlay?.classList.remove("hidden");
@@ -2228,6 +2272,132 @@ function laneRight() {
   laneIndex = Math.max(0, laneIndex - 1);
 }
 
+function syncWorldRunYawFromParts() {
+  worldRunYaw = committedRunYaw + yawSteer;
+}
+
+function wrapAnglePi(ang) {
+  const twoPi = Math.PI * 2;
+  return ((((ang + Math.PI) % twoPi) + twoPi) % twoPi) - Math.PI;
+}
+
+function resetKbSteeringState() {
+  kbArrowLeftDown = false;
+  kbArrowRightDown = false;
+  kbLeftPrevUpMs = 0;
+  kbRightPrevUpMs = 0;
+  kbHardTurnDir = 0;
+  kbHardTargetYaw = 0;
+}
+
+function onKbLeftArrowDown() {
+  kbArrowLeftDown = true;
+  const now = performance.now();
+  if (kbLeftPrevUpMs > 0 && now - kbLeftPrevUpMs < KB_ARROW_DBL_MS) {
+    kbLeftPrevUpMs = 0;
+    const eff = committedRunYaw + yawSteer;
+    kbHardTargetYaw = eff + Math.PI / 2;
+    committedRunYaw = eff;
+    yawSteer = 0;
+    kbHardTurnDir = 1;
+    syncWorldRunYawFromParts();
+  }
+}
+
+function onKbLeftArrowUp() {
+  kbArrowLeftDown = false;
+  kbLeftPrevUpMs = performance.now();
+  if (kbHardTurnDir === 1) {
+    const eff = committedRunYaw + yawSteer;
+    if (Math.abs(kbHardTargetYaw - eff) > 0.12) {
+      const q = Math.PI / 2;
+      committedRunYaw = Math.round(eff / q) * q;
+      yawSteer = 0;
+      _tmpFold.copy(_runForward);
+      syncWorldRunYawFromParts();
+      updateRunBasisVectors();
+      reanchorRunOriginAfterTurn(_tmpFold);
+    }
+    kbHardTurnDir = 0;
+  }
+}
+
+function onKbRightArrowDown() {
+  kbArrowRightDown = true;
+  const now = performance.now();
+  if (kbRightPrevUpMs > 0 && now - kbRightPrevUpMs < KB_ARROW_DBL_MS) {
+    kbRightPrevUpMs = 0;
+    const eff = committedRunYaw + yawSteer;
+    kbHardTargetYaw = eff - Math.PI / 2;
+    committedRunYaw = eff;
+    yawSteer = 0;
+    kbHardTurnDir = -1;
+    syncWorldRunYawFromParts();
+  }
+}
+
+function onKbRightArrowUp() {
+  kbArrowRightDown = false;
+  kbRightPrevUpMs = performance.now();
+  if (kbHardTurnDir === -1) {
+    const eff = committedRunYaw + yawSteer;
+    if (Math.abs(kbHardTargetYaw - eff) > 0.12) {
+      const q = Math.PI / 2;
+      committedRunYaw = Math.round(eff / q) * q;
+      yawSteer = 0;
+      _tmpFold.copy(_runForward);
+      syncWorldRunYawFromParts();
+      updateRunBasisVectors();
+      reanchorRunOriginAfterTurn(_tmpFold);
+    }
+    kbHardTurnDir = 0;
+  }
+}
+
+/**
+ * Keyboard mode: hold ←/→ to curve (yaw steer); double-tap then same arrow + hold for a 90° snap.
+ */
+function applyKbArrowSteering(dt) {
+  if (getControlMode() !== "kb" || state !== "playing" || runPaused) return;
+  if (level1VictoryFreeze || level1EndCinematicStarted) return;
+
+  if (kbHardTurnDir !== 0) {
+    const diff = kbHardTargetYaw - committedRunYaw;
+    const holdOk =
+      (kbHardTurnDir === 1 && kbArrowLeftDown && !kbArrowRightDown) ||
+      (kbHardTurnDir === -1 && kbArrowRightDown && !kbArrowLeftDown);
+    if (holdOk) {
+      if (Math.abs(diff) < 0.04) {
+        _tmpFold.copy(_runForward);
+        committedRunYaw = kbHardTargetYaw;
+        committedRunYaw = wrapAnglePi(committedRunYaw);
+        yawSteer = 0;
+        syncWorldRunYawFromParts();
+        updateRunBasisVectors();
+        reanchorRunOriginAfterTurn(_tmpFold);
+        kbHardTurnDir = 0;
+        lastWorldRunTurnAtMs = performance.now();
+      } else {
+        const step = Math.sign(diff) * Math.min(KB_HARD_TURN_RATE * dt, Math.abs(diff));
+        committedRunYaw += step;
+        syncWorldRunYawFromParts();
+      }
+    }
+    return;
+  }
+
+  if (kbArrowLeftDown && !kbArrowRightDown) {
+    yawSteer = Math.min(KB_ARROW_STEER_MAX, yawSteer + KB_ARROW_SOFT_RATE * dt);
+  } else if (kbArrowRightDown && !kbArrowLeftDown) {
+    yawSteer = Math.max(-KB_ARROW_STEER_MAX, yawSteer - KB_ARROW_SOFT_RATE * dt);
+  } else {
+    const k = Math.exp(-KB_ARROW_STEER_DECAY * dt);
+    yawSteer *= k;
+    if (Math.abs(yawSteer) < 0.004) yawSteer = 0;
+  }
+  syncWorldRunYawFromParts();
+}
+
 function updateRunBasisVectors() {
   _runForward.set(Math.sin(worldRunYaw), 0, Math.cos(worldRunYaw));
   _runRight.set(Math.cos(worldRunYaw), 0, -Math.sin(worldRunYaw));
@@ -2246,11 +2416,6 @@ function reanchorRunOriginAfterTurn(prevForward) {
   runOrigin.set(p.x - F.x * t - R.x * L, 0, p.z - F.z * t - R.z * L);
 }
 
-function normalizeWorldRunYaw() {
-  const twoPi = Math.PI * 2;
-  worldRunYaw = ((((worldRunYaw + Math.PI) % twoPi) + twoPi) % twoPi) - Math.PI;
-}
-
 function turnRunWorldBy(deltaYaw) {
   if (state !== "playing" || runPaused || level1VictoryFreeze || level1EndCinematicStarted) return;
   if (!playerBody) return;
@@ -2258,8 +2423,10 @@ function turnRunWorldBy(deltaYaw) {
   if (now - lastWorldRunTurnAtMs < WORLD_RUN_TURN_COOLDOWN_MS) return;
   lastWorldRunTurnAtMs = now;
   _tmpFold.copy(_runForward);
-  worldRunYaw += deltaYaw;
-  normalizeWorldRunYaw();
+  committedRunYaw += deltaYaw;
+  yawSteer = 0;
+  committedRunYaw = wrapAnglePi(committedRunYaw);
+  syncWorldRunYawFromParts();
   updateRunBasisVectors();
   reanchorRunOriginAfterTurn(_tmpFold);
 }
@@ -2613,8 +2780,8 @@ function countDrawableNeighbourhoodMeshes(root) {
   return n;
 }
 
-/** Load neighbourhood GLB (GitHub raw first, then repo copy) — grey materials; visible from first frame after load. */
-async function buildNeighbourhoodWorld() {
+/** Load neighbourhood GLB into scene (idempotent). */
+async function buildNeighbourhoodWorldInternal() {
   if (neighbourhoodWorldGroup) return;
   const g = new THREE.Group();
   g.name = "neighbourhoodWorld";
@@ -2660,6 +2827,22 @@ async function buildNeighbourhoodWorld() {
   g.visible = true;
   scene.add(g);
   neighbourhoodWorldGroup = g;
+}
+
+/** Await this before starting a run — starts fetch on first boot if needed. */
+async function ensureNeighbourhoodWorldLoaded() {
+  if (neighbourhoodWorldGroup) return;
+  if (!neighbourhoodLoadPromise) {
+    neighbourhoodLoadPromise = buildNeighbourhoodWorldInternal().catch((err) => {
+      neighbourhoodLoadPromise = null;
+      throw err;
+    });
+  }
+  await neighbourhoodLoadPromise;
+}
+
+async function buildNeighbourhoodWorld() {
+  await ensureNeighbourhoodWorldLoaded();
 }
 
 /** Gray shell with `tex` on +Z / −Z (along the track). */
@@ -3062,7 +3245,10 @@ function resetRun() {
   laneNavLastLeftMs = 0;
   laneNavLastRightMs = 0;
   lastWorldRunTurnAtMs = 0;
-  worldRunYaw = 0;
+  committedRunYaw = 0;
+  yawSteer = 0;
+  resetKbSteeringState();
+  syncWorldRunYawFromParts();
   runOrigin.set(0, 0, 0);
   updateRunBasisVectors();
   lastRunForward.copy(_runForward);
@@ -3225,6 +3411,10 @@ function stepPlaying(dt) {
   passFinishRibbonIfNeeded();
   tryStartLevel1EndInAir();
   tryCompleteLevel1AfterLanding();
+
+  applyKbArrowSteering(dt);
+  syncWorldRunYawFromParts();
+  updateRunBasisVectors();
 
   {
     const F = _runForward;
@@ -3515,13 +3705,13 @@ function bindUi() {
         if (e.code === "ArrowLeft") {
           if (e.repeat) return;
           e.preventDefault();
-          turnRunWorldLeft();
+          onKbLeftArrowDown();
           return;
         }
         if (e.code === "ArrowRight") {
           if (e.repeat) return;
           e.preventDefault();
-          turnRunWorldRight();
+          onKbRightArrowDown();
           return;
         }
       } else {
@@ -3572,6 +3762,18 @@ function bindUi() {
     },
     true
   );
+  window.addEventListener(
+    "keyup",
+    (e) => {
+      if (getControlMode() !== "kb") return;
+      if (e.code === "ArrowLeft") onKbLeftArrowUp();
+      if (e.code === "ArrowRight") onKbRightArrowUp();
+    },
+    true
+  );
+  window.addEventListener("blur", () => {
+    resetKbSteeringState();
+  });
 }
 
 async function bootstrap() {
@@ -3580,6 +3782,9 @@ async function bootstrap() {
   applyTouchLayout();
   initThree();
   initPhysics();
+  void ensureNeighbourhoodWorldLoaded().catch((err) => {
+    console.warn("[World] Background preload:", err?.message || err);
+  });
   bindUi();
 
   let bananaGltf = null;
@@ -3654,7 +3859,6 @@ async function bootstrap() {
   await buildPlayer();
   await buildGroundTiles();
   ensureVisibleRunwayPlane();
-  await buildNeighbourhoodWorld();
   restoreRooftopPresentation();
 
   playerRoot.position.copy(playerBody.position);
