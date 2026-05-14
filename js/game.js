@@ -48,30 +48,18 @@ const ROOFTOP_FOG_COLOR = 0xd6c8e8;
 const NEIGHBOURHOOD_SCALE_BOOST = 3.35;
 /** Minimum time the level-end overlay stays up (video + tint + copy), ms. */
 const LEVEL1_END_MIN_DURATION_MS = 12000;
-/** World +Z — aligns alley floor / tile-sink region with rooftop tiling (legacy name). */
-const LADDER_STOP_Z = 200;
-/** Player spawn +Z in the alley (short run-in before {@link maybeExitAlleyToRooftop}). */
-const ALLEY_START_Z = 210;
+/** Player spawn +Z at level run start. */
+const RUN_START_Z = 210;
 /**
- * Walkable top Y of the alley slab (same convention as {@link RUNWAY_SURFACE_Y}: top of collider).
- * ~4 m below the rooftop so the drop reads from the roof.
+ * Neighbourhood strip length (m) along +Z for fitting {@link NEIGHBOURHOOD_CITY_GLB}
+ * (covers ribbon, gap, and landing band in world +Z).
  */
-const ALLEY_SURFACE_Y = -3.72;
-/** Walkable floor width between building faces (alley + rooftop lane spacing). */
-const ALLEY_INNER_WIDTH = 5.48;
-/** Tall side walls along +Z (brick); kept low enough to read as passable with ropes. */
-const ALLEY_SIDE_WALL_H = 5.15;
-/** Far dead-end wall height — short so swing ropes read clearly over the wall. */
-const ALLEY_BACK_WALL_H = 3.35;
+const NEIGHBOURHOOD_RUN_LENGTH = Math.max(520, LEVEL1_LAND_COMPLETE_MIN_Z + 160);
+/** Target width (m) when fitting the modular neighbourhood to the running band. */
+const NEIGHBOURHOOD_RUN_WIDTH = 24;
 /** Looping run music (respects Music on/off in settings). */
 const GAME_MUSIC_SRC = `${DIR_AUDIO}ceezandray_gamemusic.mp3`;
 const TILE_Z = 10;
-/**
- * Ground tiles with `base` ≥ this stay on the rooftop collider while in the alley segment
- * (so the finish ribbon + gap stay playable). Must be > {@link LADDER_STOP_Z}.
- * Declared after {@link TILE_Z} — that constant is required for the expression.
- */
-const ALLEY_ROOFTOP_PHYSICS_RESUME_BASE = FINISH_RIBBON_Z - TILE_Z * 3;
 const TILE_POOL = 24;
 /** Solid runway between gaps — ~6–7 s of run at {@link FORWARD_SPEED}, then one TILE_Z gap. */
 const RUNWAY_GAP_EVERY_SECONDS = 6.5;
@@ -279,15 +267,12 @@ let level1EndFinishTimer = 0;
 /** Snapshot at level-1 win landing (totals + high score after end video). */
 let level1WinDist = 0;
 let level1WinScore = 0;
-/**
- * Level flow: start in the **alley**; later add wall climb → `"rooftop"` for ribbon/gap (saved layout).
- * @type {"alley" | "rooftop"}
- */
-let runSegment = "alley";
-/** Alley environment (neighbourhood GLB and/or procedural strip; visible in {@link runSegment} `"alley"`). */
-let alleyVisualGroup = null;
-/** Static Cannon floor for the alley only (added when entering alley). */
-let alleyFloorBody = null;
+/** @type {"rooftop"} */
+let runSegment = "rooftop";
+/** Imported modular neighbourhood (only visible during a run). */
+let neighbourhoodWorldGroup = null;
+/** In keyboard control mode, forward +Z run while Arrow Up or W is held. */
+let kbRunForwardHeld = false;
 /** @type {HTMLAudioElement | null} */
 let gameMusicEl = null;
 
@@ -1592,6 +1577,7 @@ function openGamePausePanel() {
   if (state !== "playing") return;
   if (level1VictoryFreeze || level1EndCinematicStarted) return;
   runPaused = true;
+  kbRunForwardHeld = false;
   playerBody.velocity.x = 0;
   playerBody.velocity.z = 0;
   gamePauseOverlay?.classList.remove("hidden");
@@ -1631,11 +1617,10 @@ function updateHeartsDom() {
 function updateCamera() {
   if (!playerRoot) return;
   const p = playerRoot.position;
-  const alleyCam = runSegment === "alley";
-  const distBack = alleyCam ? 3.2 : CAMERA_DIST_BACK;
-  const camH = alleyCam ? 1.38 : CAMERA_HEIGHT;
-  const lookAhead = alleyCam ? 5.4 : CAMERA_LOOK_AHEAD;
-  const lookYOffset = alleyCam ? 0.45 : CAMERA_LOOK_HEIGHT_OFFSET;
+  const distBack = CAMERA_DIST_BACK;
+  const camH = CAMERA_HEIGHT;
+  const lookAhead = CAMERA_LOOK_AHEAD;
+  const lookYOffset = CAMERA_LOOK_HEIGHT_OFFSET;
   _camBehind.copy(lastRunForward).multiplyScalar(-distBack);
   camera.position.set(p.x + _camBehind.x, p.y + camH, p.z + _camBehind.z);
   _camLook.copy(p).addScaledVector(lastRunForward, lookAhead);
@@ -2198,314 +2183,63 @@ async function buildPlayer() {
 }
 
 async function buildGroundTiles() {
-  let simpleStreetTemplate = null;
-  try {
-    const streetSrc = await loadFbx(`${DIR_ENV}simplestreet.fbx`);
-    const streetRoot = streetSrc.clone(true);
-    streetRoot.traverse((c) => {
-      if (!c.isMesh) return;
-      c.castShadow = true;
-      c.receiveShadow = true;
-    });
-    const box = new THREE.Box3().setFromObject(streetRoot);
-    const size = box.getSize(new THREE.Vector3());
-    const sx = Math.max(size.x, 1e-4);
-    const sz = Math.max(size.z, 1e-4);
-    /** Fit one FBX segment into our tile footprint while preserving aspect. */
-    const targetWidth = 8.9;
-    const targetDepth = TILE_Z;
-    const scale = Math.min(targetWidth / sx, targetDepth / sz);
-    streetRoot.scale.setScalar(scale);
-    streetRoot.updateMatrixWorld(true);
-    const fitted = new THREE.Box3().setFromObject(streetRoot);
-    const center = fitted.getCenter(new THREE.Vector3());
-    streetRoot.position.x -= center.x;
-    streetRoot.position.z -= center.z;
-    streetRoot.position.y += 0.02 - fitted.min.y;
-    streetRoot.updateMatrixWorld(true);
-    simpleStreetTemplate = streetRoot;
-    console.info("[Street] Using simplestreet.fbx for rooftop tiles.");
-  } catch (err) {
-    console.warn("[Street] simplestreet.fbx failed, falling back to procedural runway.", err);
-  }
-
-  let rooftopTexture = null;
-  const asphaltTextureCandidates = [
-    `${DIR_ENV}asphalt/asphalt.png`,
-    `${DIR_ENV}asphalt/asphalt.jpg`,
-    `${DIR_ENV}asphalt/asphalt_01.png`,
-    `${DIR_ENV}asphalt/asphalt_01.jpg`,
-    `${DIR_ENV}asphalt/asphalt_01_0001.jpg`,
-  ];
-  for (const texPath of asphaltTextureCandidates) {
-    try {
-      rooftopTexture = await new THREE.TextureLoader().loadAsync(texPath);
-      break;
-    } catch {
-      // Try next asphalt candidate path.
-    }
-  }
-
-  if (rooftopTexture) {
-    rooftopTexture.wrapS = THREE.RepeatWrapping;
-    rooftopTexture.wrapT = THREE.RepeatWrapping;
-    rooftopTexture.repeat.set(1.65, 1.2);
-    rooftopTexture.colorSpace = THREE.SRGBColorSpace;
-    rooftopTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  } else {
-    // Procedural rooftop fallback when asphalt texture is unavailable.
-    const canvas = document.createElement("canvas");
-    canvas.width = 512;
-    canvas.height = 512;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#706466";
-    ctx.fillRect(0, 0, 512, 512);
-    for (let y = 0; y < 512; y += 64) {
-      const rowOffset = (Math.floor(y / 64) % 2) * 26;
-      for (let x = -26; x < 512; x += 52) {
-        ctx.fillStyle = "#7b6f72";
-        ctx.fillRect(x + rowOffset, y + 3, 48, 58);
-        ctx.strokeStyle = "rgba(42,34,37,0.38)";
-        ctx.strokeRect(x + rowOffset, y + 3, 48, 58);
-      }
-    }
-    for (let i = 0; i < 120; i++) {
-      const x = Math.random() * 512;
-      const y = Math.random() * 512;
-      const w = 8 + Math.random() * 20;
-      ctx.fillStyle = `rgba(28,22,26,${0.06 + Math.random() * 0.1})`;
-      ctx.fillRect(x, y, w, 1 + Math.random() * 2);
-    }
-    rooftopTexture = new THREE.CanvasTexture(canvas);
-    rooftopTexture.wrapS = THREE.RepeatWrapping;
-    rooftopTexture.wrapT = THREE.RepeatWrapping;
-    rooftopTexture.repeat.set(1.5, 1.1);
-    rooftopTexture.colorSpace = THREE.SRGBColorSpace;
-    rooftopTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  }
-
-  const runwayMat = new THREE.MeshStandardMaterial({
-    map: rooftopTexture,
-    roughness: 0.93,
-    metalness: 0.03,
-    color: 0xd7c6be,
-  });
-  const roofEdgeMat = new THREE.MeshStandardMaterial({
-    color: 0x463a42,
-    roughness: 0.94,
-    metalness: 0.05,
-  });
-  const parapetMat = new THREE.MeshStandardMaterial({
-    color: 0x7a6768,
-    roughness: 0.9,
-    metalness: 0.04,
-  });
-  const facadeMat = new THREE.MeshStandardMaterial({
-    color: 0x2a2632,
-    roughness: 0.95,
-    metalness: 0.03,
-  });
-  const deepShadowMat = new THREE.MeshStandardMaterial({
-    color: 0x09080d,
-    roughness: 1,
-    metalness: 0,
-    transparent: true,
-    opacity: 0.9,
-  });
-  const seamMat = new THREE.MeshStandardMaterial({
-    color: 0x2b242b,
-    roughness: 0.97,
-    metalness: 0,
-  });
-  const laneLineMat = new THREE.MeshStandardMaterial({
-    color: 0xefe2cc,
-    roughness: 0.85,
-    metalness: 0.02,
-  });
-
+  /** Invisible Cannon slabs only — visuals are {@link neighbourhoodWorldGroup}. */
+  const emptyUserData = {
+    runway: null,
+    laneDividerL: null,
+    laneDividerR: null,
+    leftRoof: null,
+    rightRoof: null,
+    leftFacade: null,
+    rightFacade: null,
+    underShadow: null,
+    seamFront: null,
+    edgeFaceFront: null,
+    edgeFaceBack: null,
+    pit: null,
+    buildingTop: null,
+    body: null,
+  };
   for (let i = 0; i < TILE_POOL; i++) {
     const tile = new THREE.Group();
-
-    const runway = simpleStreetTemplate
-      ? simpleStreetTemplate.clone(true)
-      : new THREE.Mesh(new THREE.PlaneGeometry(6.6, TILE_Z), runwayMat);
-    if (!simpleStreetTemplate) {
-      runway.rotation.x = -Math.PI / 2;
-      runway.position.y = 0.02;
-      runway.receiveShadow = true;
-    }
-    tile.add(runway);
-
-    const laneDividerL = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.015, TILE_Z), laneLineMat);
-    laneDividerL.position.set(-0.65, 0.03, 0);
-    laneDividerL.receiveShadow = true;
-    laneDividerL.visible = false;
-    tile.add(laneDividerL);
-    const laneDividerR = laneDividerL.clone();
-    laneDividerR.position.x = 0.65;
-    laneDividerR.visible = false;
-    tile.add(laneDividerR);
-
-    const leftRoof = new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.3, TILE_Z), roofEdgeMat);
-    leftRoof.position.set(-3.875, 0.15, 0);
-    leftRoof.receiveShadow = true;
-    tile.add(leftRoof);
-    const rightRoof = leftRoof.clone();
-    rightRoof.position.x = 3.875;
-    tile.add(rightRoof);
-
-    const leftWall = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.85, TILE_Z), parapetMat);
-    leftWall.position.set(-4.45, 0.425, 0);
-    leftWall.castShadow = true;
-    leftWall.receiveShadow = true;
-    tile.add(leftWall);
-    const rightWall = leftWall.clone();
-    rightWall.position.x = 4.45;
-    tile.add(rightWall);
-
-    // High-rise illusion: deep facades/drop below the roofline.
-    const leftFacade = new THREE.Mesh(new THREE.BoxGeometry(2.8, 30, TILE_Z), facadeMat);
-    leftFacade.position.set(-6.1, -15, 0);
-    leftFacade.castShadow = true;
-    leftFacade.receiveShadow = true;
-    tile.add(leftFacade);
-    const rightFacade = leftFacade.clone();
-    rightFacade.position.x = 6.1;
-    tile.add(rightFacade);
-
-    const underShadow = new THREE.Mesh(new THREE.PlaneGeometry(15.2, TILE_Z), deepShadowMat);
-    underShadow.rotation.x = -Math.PI / 2;
-    underShadow.position.y = -2.4;
-    tile.add(underShadow);
-
-    const seamFront = new THREE.Mesh(new THREE.BoxGeometry(8.9, 0.03, 0.18), seamMat);
-    seamFront.position.set(0, 0.025, TILE_Z * 0.5 - 0.09);
-    seamFront.receiveShadow = true;
-    tile.add(seamFront);
-    const edgeFaceMat = new THREE.MeshStandardMaterial({
-      color: 0x2a2632,
-      roughness: 0.95,
-      metalness: 0.03,
-    });
-    const edgeFaceFront = new THREE.Mesh(new THREE.BoxGeometry(8.9, 4.8, 0.26), edgeFaceMat);
-    edgeFaceFront.position.set(0, -2.38, TILE_Z * 0.5 - 0.13);
-    edgeFaceFront.castShadow = true;
-    edgeFaceFront.receiveShadow = true;
-    edgeFaceFront.visible = false;
-    tile.add(edgeFaceFront);
-    const edgeFaceBack = edgeFaceFront.clone();
-    edgeFaceBack.position.z = -TILE_Z * 0.5 + 0.13;
-    tile.add(edgeFaceBack);
-
-    const pit = new THREE.Mesh(
-      new THREE.PlaneGeometry(8.9, TILE_Z),
-      new THREE.MeshStandardMaterial({
-        color: 0x09070c,
-        roughness: 1,
-        metalness: 0,
-        transparent: true,
-        opacity: 0.96,
-      })
-    );
-    pit.rotation.x = -Math.PI / 2;
-    pit.position.y = -0.06;
-    pit.visible = false;
-    tile.add(pit);
-
-    const buildingTop = null;
-
     const body = new CANNON.Body({ mass: 0, material: groundPhysicsMaterial });
     body.addShape(new CANNON.Box(new CANNON.Vec3(3.3, 0.14, TILE_Z * 0.5)));
     body.position.set(0, 0.14, i * TILE_Z - TILE_Z * 4);
     body.userData = { type: "groundTile" };
     world.addBody(body);
-    tile.userData = {
-      runway,
-      laneDividerL,
-      laneDividerR,
-      leftRoof,
-      rightRoof,
-      leftFacade,
-      rightFacade,
-      underShadow,
-      seamFront,
-      edgeFaceFront,
-      edgeFaceBack,
-      pit,
-      buildingTop,
-      body,
-    };
-
+    tile.userData = { ...emptyUserData, body };
     tile.position.set(0, 0, i * TILE_Z - TILE_Z * 4);
     scene.add(tile);
     groundTiles.push(tile);
   }
 }
 
-function removeAlleyFloorBody() {
-  if (!alleyFloorBody || !world) return;
-  world.removeBody(alleyFloorBody);
-  alleyFloorBody = null;
-}
-
-/** Return to rooftop sky fog and clear alley-only physics (main menu / leave run). */
+/** Main menu / leave run — lighter fog; hide modular neighbourhood. */
 function restoreRooftopPresentation() {
   runSegment = "rooftop";
   if (world) world.gravity.set(0, -32, 0);
-  removeAlleyFloorBody();
   if (scene?.fog) {
     scene.fog.color.setHex(ROOFTOP_FOG_COLOR);
     scene.fog.near = 55;
     scene.fog.far = 300;
   }
-  if (alleyVisualGroup) alleyVisualGroup.visible = false;
+  if (neighbourhoodWorldGroup) neighbourhoodWorldGroup.visible = false;
 }
 
-/** Start-of-run: player begins in the alley (floor + visuals + fog). Rooftop segment unchanged for later climb-up. */
-function applyAlleyRunStartState() {
-  runSegment = "alley";
+/** Start-of-run: show neighbourhood + dusk fog (no separate alley/runway meshes). */
+function applyNeighbourhoodRunStartState() {
+  runSegment = "rooftop";
   if (world) world.gravity.set(0, -32, 0);
-  removeAlleyFloorBody();
-  ensureAlleyFloorBody();
   if (scene?.fog) {
     scene.fog.color.setHex(ALLEY_FOG_COLOR);
-    scene.fog.near = 22;
-    scene.fog.far = 360;
+    scene.fog.near = 28;
+    scene.fog.far = 420;
   }
-  if (alleyVisualGroup) alleyVisualGroup.visible = true;
+  if (neighbourhoodWorldGroup) neighbourhoodWorldGroup.visible = true;
 }
 
 function getActiveRunSurfaceY() {
-  return runSegment === "alley" ? ALLEY_SURFACE_Y : RUNWAY_SURFACE_Y;
-}
-
-function ensureAlleyFloorBody() {
-  if (alleyFloorBody || !world) return;
-  const halfX = Math.max(6.0, ALLEY_INNER_WIDTH * 0.5 + 2.35);
-  const halfY = 0.14;
-  const span = Math.max(40, ALLEY_ROOFTOP_PHYSICS_RESUME_BASE - LADDER_STOP_Z - 6);
-  const halfZ = span * 0.5;
-  alleyFloorBody = new CANNON.Body({ mass: 0, material: groundPhysicsMaterial });
-  alleyFloorBody.addShape(new CANNON.Box(new CANNON.Vec3(halfX, halfY, halfZ)));
-  alleyFloorBody.position.set(0, ALLEY_SURFACE_Y - halfY, LADDER_STOP_Z + halfZ);
-  alleyFloorBody.userData = { type: "alleyFloor" };
-  world.addBody(alleyFloorBody);
-}
-
-/** Back to rooftop pacing, fog, and colliders before the finish ribbon. */
-function maybeExitAlleyToRooftop() {
-  if (runSegment !== "alley" || !playerBody) return;
-  if (playerBody.position.z < ALLEY_ROOFTOP_PHYSICS_RESUME_BASE - 12) return;
-  runSegment = "rooftop";
-  removeAlleyFloorBody();
-  playerBody.position.y = RUNWAY_SURFACE_Y + PLAYER_HALF.y;
-  if (playerBody.velocity.y < 0) playerBody.velocity.y = 0;
-  if (scene?.fog) {
-    scene.fog.color.setHex(ROOFTOP_FOG_COLOR);
-    scene.fog.near = 55;
-    scene.fog.far = 300;
-  }
-  if (alleyVisualGroup) alleyVisualGroup.visible = false;
+  return RUNWAY_SURFACE_Y;
 }
 
 function recycleGroundTiles() {
@@ -2514,144 +2248,22 @@ function recycleGroundTiles() {
   groundTiles.forEach((tile, i) => {
     const base = start + i * TILE_Z;
     const gap = isGapSegment(base);
-    const sinkUnderAlley =
-      runSegment === "alley" &&
-      base >= LADDER_STOP_Z - TILE_Z &&
-      base < ALLEY_ROOFTOP_PHYSICS_RESUME_BASE;
-    const sinkRooftop = sinkUnderAlley;
-    const hideRunwaySurf = gap || sinkRooftop;
     tile.position.x = 0;
     tile.position.y = 0;
     tile.position.z = base;
     const body = tile.userData?.body;
     if (body) {
       body.position.x = 0;
-      body.position.y = gap || sinkRooftop ? -40 : 0.14;
+      body.position.y = gap ? -40 : 0.14;
       body.position.z = base;
       body.velocity.set(0, 0, 0);
       body.angularVelocity.set(0, 0, 0);
     }
-    if (tile.userData?.runway) tile.userData.runway.visible = !hideRunwaySurf;
-    if (tile.userData?.laneDividerL) tile.userData.laneDividerL.visible = false;
-    if (tile.userData?.laneDividerR) tile.userData.laneDividerR.visible = false;
-    if (tile.userData?.leftRoof) tile.userData.leftRoof.visible = !hideRunwaySurf;
-    if (tile.userData?.rightRoof) tile.userData.rightRoof.visible = !hideRunwaySurf;
-    if (tile.userData?.leftFacade) tile.userData.leftFacade.visible = !sinkRooftop;
-    if (tile.userData?.rightFacade) tile.userData.rightFacade.visible = !sinkRooftop;
-    if (tile.userData?.underShadow) tile.userData.underShadow.visible = !hideRunwaySurf;
-    if (tile.userData?.seamFront) tile.userData.seamFront.visible = !hideRunwaySurf;
-    if (tile.userData?.edgeFaceFront) tile.userData.edgeFaceFront.visible = gap;
-    if (tile.userData?.edgeFaceBack) tile.userData.edgeFaceBack.visible = gap;
-    if (tile.userData?.pit) tile.userData.pit.visible = gap;
   });
-}
-
-/** Plain gray rooftop block (bottom origin). */
-function makeSimpleRooftopBlock(w, h, d, color) {
-  const geo = new THREE.BoxGeometry(w, h, d);
-  geo.translate(0, h / 2, 0);
-  const mat = new THREE.MeshStandardMaterial({
-    color,
-    roughness: 0.91,
-    metalness: 0.06,
-  });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  return mesh;
-}
-
-/** Procedural brick albedo (shared, cloned per mesh for independent UV repeat). */
-let brickAlbedoTexture = null;
-function getBrickAlbedoTexture() {
-  if (brickAlbedoTexture) return brickAlbedoTexture;
-  const c = document.createElement("canvas");
-  c.width = 256;
-  c.height = 256;
-  const ctx = c.getContext("2d");
-  if (!ctx) return null;
-  ctx.fillStyle = "#5c4037";
-  ctx.fillRect(0, 0, 256, 256);
-  const brickW = 52;
-  const brickH = 26;
-  const mortar = 3;
-  for (let row = 0; row < 14; row++) {
-    const y = row * (brickH + mortar);
-    const ox = (row % 2) * (brickW / 2 + mortar);
-    for (let col = -1; col < 10; col++) {
-      const x = col * (brickW + mortar) + ox;
-      const t = (row * 17 + col * 13) % 5;
-      const shade = 0.88 + t * 0.035;
-      ctx.fillStyle = `rgb(${Math.floor(132 * shade)},${Math.floor(86 * shade)},${Math.floor(72 * shade)})`;
-      ctx.fillRect(x, y, brickW - mortar, brickH - mortar);
-    }
-  }
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  brickAlbedoTexture = tex;
-  return brickAlbedoTexture;
-}
-
-function makeBrickWallTemplate(w, h, d) {
-  const geo = new THREE.BoxGeometry(w, h, d);
-  geo.translate(0, h / 2, 0);
-  const base = getBrickAlbedoTexture();
-  const map = base ? base.clone() : null;
-  if (map) {
-    map.repeat.set(Math.max(1, w * 0.95), Math.max(0.75, h * 0.85));
-    map.needsUpdate = true;
-  }
-  const mat = new THREE.MeshStandardMaterial({
-    map: map || undefined,
-    color: map ? 0xffffff : 0x8b5a4a,
-    roughness: 0.9,
-    metalness: 0.04,
-  });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  return mesh;
-}
-
-/** Sagging rope in local XY; group is placed at alley Z and rotated for a gentle swing. */
-function makeAlleySwingRopeMesh(innerW, attachY, sag, tubeR = 0.042) {
-  const half = innerW * 0.43;
-  const curve = new THREE.QuadraticBezierCurve3(
-    new THREE.Vector3(-half, attachY, 0),
-    new THREE.Vector3(0, attachY - sag, 0),
-    new THREE.Vector3(half, attachY, 0)
-  );
-  const geo = new THREE.TubeGeometry(curve, 28, tubeR, 7, false);
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x2a241c,
-    roughness: 0.91,
-    metalness: 0.04,
-  });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  return mesh;
-}
-
-function updateAlleySwingRopes(nowMs) {
-  const roots = alleyVisualGroup?.userData?.ropeSwingRoots;
-  if (!roots?.length) return;
-  const t = nowMs * 0.001;
-  for (const entry of roots) {
-    const { root, phase } = entry;
-    if (!root) continue;
-    const ph = phase ?? 0;
-    root.rotation.z = Math.sin(t * 2.05 + ph) * 0.095;
-    root.rotation.x = Math.sin(t * 1.55 + ph * 1.7) * 0.045;
-  }
 }
 
 /**
- * Scale / place the imported neighbourhood so it covers the alley strip in local +Z (0 … `targetLength`).
+ * Scale / place the imported neighbourhood along the forward run in local +Z (0 … `targetLength`).
  * Assumes Y-up GLB; may yaw 90° if the asset’s long axis is X.
  * @param {THREE.Object3D} root
  */
@@ -2745,197 +2357,11 @@ function bakeNeighbourhoodVertexColors(root) {
   });
 }
 
-/** Vertex tints on box geometry from normals + mild noise (low-poly city read). */
-function bakeVertexColorsForBoxGeometry(geometry, hsl) {
-  const pos = geometry.attributes.position;
-  const nrm = geometry.attributes.normal;
-  if (!pos || !nrm) return;
-  const count = pos.count;
-  const arr = new Float32Array(count * 3);
-  const c = new THREE.Color();
-  const v = new THREE.Vector3();
-  const n = new THREE.Vector3();
-  for (let i = 0; i < count; i++) {
-    v.fromBufferAttribute(pos, i);
-    n.fromBufferAttribute(nrm, i);
-    const jitter = 0.045 * Math.sin(v.x * 0.12 + v.y * 0.09 + v.z * 0.11);
-    if (n.y > 0.45) {
-      c.setHSL(hsl.h + jitter * 0.4, hsl.s * 0.45, 0.54);
-    } else if (n.y < -0.35) {
-      c.setHSL(hsl.h, 0.12, 0.1);
-    } else {
-      c.setHSL(hsl.h + 0.04 * n.x, hsl.s, hsl.l + jitter);
-    }
-    arr[i * 3] = c.r;
-    arr[i * 3 + 1] = c.g;
-    arr[i * 3 + 2] = c.b;
-  }
-  if (geometry.attributes.color) geometry.deleteAttribute("color");
-  geometry.setAttribute("color", new THREE.BufferAttribute(arr, 3));
-}
-
-function makeVcBuildingMesh(w, h, d, hsl, x, y, z) {
-  const geo = new THREE.BoxGeometry(w, h, d);
-  bakeVertexColorsForBoxGeometry(geo, hsl);
-  const mesh = new THREE.Mesh(
-    geo,
-    new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      vertexColors: true,
-      flatShading: true,
-      roughness: 0.91,
-      metalness: 0.04,
-    })
-  );
-  mesh.position.set(x, y, z);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  return mesh;
-}
-
-/**
- * Large-scale vertex-coloured street canyon when the neighbourhood GLB is missing.
- * Matches alley length so the run reads as moving through city blocks.
- */
-function addProceduralAlleyStripContent(g, innerW, len) {
-  const streetW = innerW + 8;
-  const lenPad = len + 24;
-  const zMid = len * 0.5;
-  const gHalf = streetW * 0.5;
-
-  const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(streetW, lenPad),
-    new THREE.MeshStandardMaterial({
-      color: 0x1e1a24,
-      roughness: 0.94,
-      metalness: 0.05,
-    })
-  );
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.set(0, 0.02, zMid);
-  floor.receiveShadow = true;
-  g.add(floor);
-
-  const wet = new THREE.Mesh(
-    new THREE.PlaneGeometry(innerW * 0.55, lenPad * 0.94),
-    new THREE.MeshStandardMaterial({ color: 0x252033, roughness: 0.35, metalness: 0.12 })
-  );
-  wet.rotation.x = -Math.PI / 2;
-  wet.position.set(0, 0.028, zMid);
-  wet.receiveShadow = true;
-  g.add(wet);
-
-  const wPrimary = 5.4;
-  const hPrimary = 48;
-  g.add(
-    makeVcBuildingMesh(
-      wPrimary,
-      hPrimary,
-      lenPad,
-      { h: 0.74, s: 0.26, l: 0.42 },
-      -(gHalf + wPrimary * 0.5 + 0.35),
-      hPrimary * 0.5,
-      zMid
-    )
-  );
-  g.add(
-    makeVcBuildingMesh(
-      wPrimary,
-      hPrimary,
-      lenPad,
-      { h: 0.55, s: 0.24, l: 0.44 },
-      gHalf + wPrimary * 0.5 + 0.35,
-      hPrimary * 0.5,
-      zMid
-    )
-  );
-
-  const wBack = 4.2;
-  const hBack = 64;
-  const setback = 11.5;
-  g.add(
-    makeVcBuildingMesh(
-      wBack,
-      hBack,
-      lenPad + 8,
-      { h: 0.82, s: 0.22, l: 0.4 },
-      -(gHalf + wPrimary + setback + wBack * 0.5),
-      hBack * 0.5,
-      zMid
-    )
-  );
-  g.add(
-    makeVcBuildingMesh(
-      wBack,
-      hBack,
-      lenPad + 8,
-      { h: 0.12, s: 0.2, l: 0.43 },
-      gHalf + wPrimary + setback + wBack * 0.5,
-      hBack * 0.5,
-      zMid
-    )
-  );
-
-  const hueSet = [0.14, 0.62, 0.42, 0.08, 0.76];
-  for (let i = 0; i < 9; i++) {
-    const tz = 24 + i * 27;
-    if (tz > len - 20) break;
-    const side = i % 2 === 0 ? -1 : 1;
-    const hx = 4.4 + (i % 4) * 0.75;
-    const hz = 5.2 + (i % 3) * 1.05;
-    const ht = 18 + ((i * 7) % 30);
-    const hsl = { h: hueSet[i % hueSet.length], s: 0.28, l: 0.41 };
-    const laneEdge = innerW * 0.5 + 0.55;
-    const xCenter = side * (laneEdge + hx * 0.5 + 0.5);
-    g.add(makeVcBuildingMesh(hx, ht, hz, hsl, xCenter, ht * 0.5, tz));
-  }
-
-  const wFar = 2.9;
-  const hFar = 76;
-  const farX = gHalf + wPrimary + setback + wBack + 5.5 + wFar * 0.5;
-  g.add(makeVcBuildingMesh(wFar, hFar, lenPad + 22, { h: 0.7, s: 0.18, l: 0.36 }, -farX, hFar * 0.5, zMid));
-  g.add(makeVcBuildingMesh(wFar, hFar, lenPad + 22, { h: 0.65, s: 0.2, l: 0.38 }, farX, hFar * 0.5, zMid));
-
-  const endGeo = new THREE.BoxGeometry(streetW + 32, ALLEY_BACK_WALL_H + 8, 1.8);
-  bakeVertexColorsForBoxGeometry(endGeo, { h: 0.78, s: 0.18, l: 0.4 });
-  const endWall = new THREE.Mesh(
-    endGeo,
-    new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      vertexColors: true,
-      flatShading: true,
-      roughness: 0.9,
-      metalness: 0.04,
-    })
-  );
-  endWall.position.set(0, (ALLEY_BACK_WALL_H + 8) * 0.5, len - 0.85);
-  endWall.castShadow = true;
-  endWall.receiveShadow = true;
-  g.add(endWall);
-
-  const neonMat = new THREE.MeshStandardMaterial({
-    color: 0x5a7d8a,
-    emissive: 0x2a5060,
-    emissiveIntensity: 0.65,
-    roughness: 0.42,
-    metalness: 0.12,
-  });
-  const neon = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.35, 0.12), neonMat);
-  neon.position.set(innerW * 0.22, 22, 38);
-  g.add(neon);
-  const neon2 = neon.clone();
-  neon2.position.set(-innerW * 0.28, 28, 118);
-  g.add(neon2);
-}
-
-async function buildAlleyVisuals() {
-  if (alleyVisualGroup) return;
+/** Load {@link NEIGHBOURHOOD_CITY_GLB} once — sole run environment (no procedural alley / runway strip). */
+async function buildNeighbourhoodWorld() {
+  if (neighbourhoodWorldGroup) return;
   const g = new THREE.Group();
-  g.name = "alleyVisual";
-  const innerW = ALLEY_INNER_WIDTH;
-  const len = Math.max(120, ALLEY_ROOFTOP_PHYSICS_RESUME_BASE - LADDER_STOP_Z - 24);
-  const wallH = ALLEY_SIDE_WALL_H;
-  let usedNeighbourhood = false;
+  g.name = "neighbourhoodWorld";
   try {
     const gltf = await loadGltf(NEIGHBOURHOOD_CITY_GLB);
     const hood = gltf.scene.clone(true);
@@ -2946,33 +2372,17 @@ async function buildAlleyVisuals() {
         ch.receiveShadow = true;
       }
     });
-    fitNeighbourhoodToAlley(hood, innerW + 9, len);
+    fitNeighbourhoodToAlley(hood, NEIGHBOURHOOD_RUN_WIDTH, NEIGHBOURHOOD_RUN_LENGTH);
     bakeNeighbourhoodVertexColors(hood);
     g.add(hood);
-    usedNeighbourhood = true;
-    console.info("[Alley] Neighbourhood GLB:", NEIGHBOURHOOD_CITY_GLB);
+    console.info("[World] Neighbourhood GLB:", NEIGHBOURHOOD_CITY_GLB);
   } catch (err) {
-    console.warn("[Alley] Neighbourhood GLB unavailable — procedural strip.", err);
+    console.error("[World] Neighbourhood GLB failed:", err);
   }
-  if (!usedNeighbourhood) addProceduralAlleyStripContent(g, innerW, len);
-  const ropeAttachY = Math.max(22, wallH + 12);
-  const ropeSwingRoots = [];
-  const ropeZs = [len * 0.68, len * 0.78, len * 0.88];
-  const ropeSags = [1.05, 1.22, 1.38];
-  for (let i = 0; i < ropeZs.length; i++) {
-    const root = new THREE.Group();
-    root.name = `alleyRopeSwing_${i}`;
-    root.position.set(0, 0, ropeZs[i]);
-    const rope = makeAlleySwingRopeMesh(innerW, ropeAttachY, ropeSags[i], 0.038 + i * 0.004);
-    root.add(rope);
-    g.add(root);
-    ropeSwingRoots.push({ root, phase: i * 1.9 + 0.35 });
-  }
-  g.userData.ropeSwingRoots = ropeSwingRoots;
-  g.position.set(0, ALLEY_SURFACE_Y, LADDER_STOP_Z);
+  g.position.set(0, RUNWAY_SURFACE_Y, 0);
   g.visible = false;
   scene.add(g);
-  alleyVisualGroup = g;
+  neighbourhoodWorldGroup = g;
 }
 
 /** Gray shell with `tex` on +Z / −Z (along the track). */
@@ -3010,9 +2420,9 @@ function pushObstacleVariant(template, w, h, d, opts = {}) {
   });
 }
 
-/** Rooftop `y=0` mesh origin; alley uses {@link ALLEY_SURFACE_Y}. */
+/** Obstacle mesh origin Y in local runway strip space (tile group uses y=0). */
 function getObstacleSurfaceY() {
-  return runSegment === "alley" ? ALLEY_SURFACE_Y : 0;
+  return 0;
 }
 
 async function loadTrashCanAtlasTextures() {
@@ -3263,14 +2673,9 @@ function spawnContentAhead() {
   const pz = playerBody.position.z;
   while (nextSpawnZ < pz + SPAWN_Z_AHEAD_MAX) {
     const laneIdx = Math.floor(rng() * 3);
-    /** Keep a clear band before alley → rooftop handoff (future wall-climb trigger zone). */
-    const blockNearRooftopResume =
-      nextSpawnZ >= ALLEY_ROOFTOP_PHYSICS_RESUME_BASE - 48 &&
-      nextSpawnZ <= ALLEY_ROOFTOP_PHYSICS_RESUME_BASE + 28;
     if (
       OBSTACLES_ENABLED &&
       obstacleVariantSpecs.length > 0 &&
-      !blockNearRooftopResume &&
       obstacleSpawnIndex % OBSTACLE_BUILDING_INTERVAL === 0
     ) {
       spawnObstacle(nextSpawnZ, laneIdx);
@@ -3380,7 +2785,8 @@ function syncPlayerMesh(dt) {
 
 function resetRun() {
   rng = mulberry32((Math.random() * 0xffffffff) >>> 0);
-  applyAlleyRunStartState();
+  kbRunForwardHeld = false;
+  applyNeighbourhoodRunStartState();
   laneIndex = 1;
   coins = 0;
   lives = 3;
@@ -3403,11 +2809,11 @@ function resetRun() {
   clearProjectiles();
 
   playerBody.velocity.set(0, 0, 0);
-  playerBody.position.set(LANES[laneIndex], ALLEY_SURFACE_Y + PLAYER_HALF.y, ALLEY_START_Z);
-  nextSpawnZ = Math.floor((ALLEY_START_Z + SPAWN_Z_AHEAD_MIN) / TILE_Z) * TILE_Z;
+  playerBody.position.set(LANES[laneIndex], RUNWAY_SURFACE_Y + PLAYER_HALF.y, RUN_START_Z);
+  nextSpawnZ = Math.floor((RUN_START_Z + SPAWN_Z_AHEAD_MIN) / TILE_Z) * TILE_Z;
   obstacleSpawnIndex = Math.max(0, Math.floor(nextSpawnZ / TILE_Z) % OBSTACLE_BUILDING_INTERVAL);
   if (OBSTACLES_ENABLED && obstacleVariantSpecs.length > 0) {
-    spawnObstacle(ALLEY_START_Z + 20, 1);
+    spawnObstacle(RUN_START_Z + 20, 1);
     obstacleSpawnIndex += 1;
   }
   hudCoins.textContent = "0";
@@ -3450,6 +2856,7 @@ async function startGame() {
 function returnToMainMenuFromRun(bestCandidateScore) {
   if (state !== "playing" && state !== "gameOver") return;
   closeGamePausePanel();
+  kbRunForwardHeld = false;
   const hi = readHighScore();
   if (bestCandidateScore > hi) writeHighScore(bestCandidateScore);
   if (highScoreLine) {
@@ -3527,9 +2934,6 @@ function updateHud(dt) {
       hudDistance.textContent = `Level complete`;
     } else if (level1EndCinematicStarted) {
       hudDistance.textContent = `Finishing…`;
-    } else if (runSegment === "alley") {
-      const remain = Math.max(0, Math.ceil(FINISH_RIBBON_Z - playerBody.position.z));
-      hudDistance.textContent = `Alley · ${remain} m to line · ${elapsedSecs.toFixed(1)} s`;
     } else if (passedFinishRibbon) {
       hudDistance.textContent = `Jump the gap! · ${elapsedSecs.toFixed(1)} s`;
     } else {
@@ -3541,10 +2945,8 @@ function updateHud(dt) {
 
 function stepPlaying(dt) {
   passFinishRibbonIfNeeded();
-  if (runSegment === "rooftop" || runSegment === "alley") {
-    tryStartLevel1EndInAir();
-    tryCompleteLevel1AfterLanding();
-  }
+  tryStartLevel1EndInAir();
+  tryCompleteLevel1AfterLanding();
 
   {
     const targetX = LANES[laneIndex];
@@ -3552,7 +2954,9 @@ function stepPlaying(dt) {
     const blocked = level1VictoryFreeze;
     if (!blocked) {
       playerBody.velocity.x = vx;
-      playerBody.velocity.z = FORWARD_SPEED;
+      const kbMode = getControlMode() === "kb";
+      const forward = !kbMode || kbRunForwardHeld;
+      playerBody.velocity.z = forward ? FORWARD_SPEED : 0;
     } else {
       playerBody.velocity.x = 0;
       playerBody.velocity.z = 0;
@@ -3565,10 +2969,6 @@ function stepPlaying(dt) {
     endGameLoss();
     return;
   }
-
-  maybeExitAlleyToRooftop();
-
-  if (runSegment === "alley") updateAlleySwingRopes(performance.now());
 
   syncPlayerMesh(dt);
   updateProjectiles(dt);
@@ -3590,7 +2990,6 @@ function animate() {
     if (state === "playing" && !runPaused) {
       stepPlaying(dt);
     } else if (state === "playing" && runPaused) {
-      if (runSegment === "alley") updateAlleySwingRopes(performance.now());
       syncPlayerMesh(dt);
       updateCamera();
       updateHud(dt);
@@ -3783,68 +3182,82 @@ function bindUi() {
   window.addEventListener(
     "keydown",
     (e) => {
-    if (e.code === "Escape") {
-      if (state === "playing" && (level1VictoryFreeze || level1EndCinematicStarted)) {
+      if (e.code === "Escape") {
+        if (state === "playing" && (level1VictoryFreeze || level1EndCinematicStarted)) {
+          e.preventDefault();
+          return;
+        }
+        if (state === "playing" && runPaused) {
+          e.preventDefault();
+          closeGamePausePanel();
+          return;
+        }
+        if (state === "playing" && !runPaused) {
+          e.preventDefault();
+          openGamePausePanel();
+          return;
+        }
+      }
+      if (
+        state === "playing" &&
+        !runPaused &&
+        !level1VictoryFreeze &&
+        !level1EndCinematicStarted &&
+        (e.code === "ArrowUp" || e.code === "KeyW")
+      ) {
         e.preventDefault();
+        kbRunForwardHeld = true;
+      }
+      if (state !== "playing" || runPaused) return;
+      if (level1VictoryFreeze || level1EndCinematicStarted) return;
+      if (e.code === "KeyA" || e.code === "ArrowLeft" || e.code === "KeyQ") {
+        if (e.repeat) return;
+        e.preventDefault();
+        laneLeft();
         return;
       }
-      if (state === "playing" && runPaused) {
+      if (e.code === "KeyD" || e.code === "ArrowRight" || e.code === "KeyE") {
+        if (e.repeat) return;
         e.preventDefault();
-        closeGamePausePanel();
+        laneRight();
         return;
       }
-      if (state === "playing" && !runPaused) {
+      if (e.code === "Space" || e.key === " ") {
+        if (e.repeat) return;
         e.preventDefault();
-        openGamePausePanel();
+        playJumpOverObstaclesAnim();
         return;
       }
-    }
-    if (state !== "playing" || runPaused) return;
-    if (level1VictoryFreeze || level1EndCinematicStarted) return;
-    if (e.code === "KeyA" || e.code === "ArrowLeft") {
-      if (e.repeat) return;
-      e.preventDefault();
-      laneLeft();
-      return;
-    }
-    if (e.code === "KeyD" || e.code === "ArrowRight") {
-      if (e.repeat) return;
-      e.preventDefault();
-      laneRight();
-      return;
-    }
-    if (e.code === "Space" || e.key === " ") {
-      if (e.repeat) return;
-      e.preventDefault();
-      playJumpOverObstaclesAnim();
-      return;
-    }
-    if (e.code === "ArrowUp") {
-      if (e.repeat) return;
-      e.preventDefault();
-      throwBanana();
-      return;
-    }
-    if (e.code === "ArrowDown") {
-      if (e.repeat) return;
-      e.preventDefault();
-      fireSeeds();
-      return;
-    }
-    if (e.code === "KeyB") {
-      if (e.repeat) return;
-      e.preventDefault();
-      throwBanana();
-      return;
-    }
-    if (e.code === "KeyN") {
-      if (e.repeat) return;
-      e.preventDefault();
-      fireSeeds();
-    }
+      if (e.code === "ArrowDown") {
+        if (e.repeat) return;
+        e.preventDefault();
+        throwBanana();
+        return;
+      }
+      if (e.code === "KeyB") {
+        if (e.repeat) return;
+        e.preventDefault();
+        throwBanana();
+        return;
+      }
+      if (e.code === "KeyN") {
+        if (e.repeat) return;
+        e.preventDefault();
+        fireSeeds();
+      }
     },
     true
   );
+  window.addEventListener(
+    "keyup",
+    (e) => {
+      if (e.code === "ArrowUp" || e.code === "KeyW") kbRunForwardHeld = false;
+    },
+    true
+  );
+  window.addEventListener("blur", () => {
+    kbRunForwardHeld = false;
+  });
 }
 
 async function bootstrap() {
@@ -3927,7 +3340,7 @@ async function bootstrap() {
 
   await buildPlayer();
   await buildGroundTiles();
-  await buildAlleyVisuals();
+  await buildNeighbourhoodWorld();
   restoreRooftopPresentation();
 
   playerRoot.position.copy(playerBody.position);
