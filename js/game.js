@@ -3606,7 +3606,17 @@ function animate() {
 }
 
 function bindUi() {
-  btnStart?.addEventListener("click", () => showPreLevel());
+  const goPreLevel = () => showPreLevel();
+  btnStart?.addEventListener("click", goPreLevel);
+  // Touch / iOS: same pattern as Enter Level 1 — pointerdown + preventDefault so the gesture reliably opens pre-level.
+  btnStart?.addEventListener(
+    "pointerdown",
+    (e) => {
+      e.preventDefault();
+      goPreLevel();
+    },
+    { passive: false }
+  );
   btnEnterLevel1?.addEventListener("click", () => tryEnterLevelFromPrelevel());
   btnEnterLevel1?.addEventListener("pointerdown", (e) => {
     e.preventDefault();

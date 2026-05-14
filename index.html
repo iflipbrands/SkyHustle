@@ -256,12 +256,13 @@
       transform: translate3d(0, 0, 0);
     }
   </style>
+  <!-- CDN: GitHub Pages has no npm install — local ./node_modules/* would 404 and block the whole module (Play would never bind). -->
   <script type="importmap">
   {
     "imports": {
-      "three": "./node_modules/three/build/three.module.js",
-      "three/addons/": "./node_modules/three/examples/jsm/",
-      "cannon-es": "./node_modules/cannon-es/dist/cannon-es.js"
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+      "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
     }
   }
   </script>
