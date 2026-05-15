@@ -8,8 +8,8 @@ import * as CANNON from "cannon-es";
 
 /** Three lane offsets perpendicular to current run heading. `laneIndex` 0 | 1 | 2. {@link tryNavigateLaneOrTurnLeft} / laneRight: tap = lane, double-tap or Shift = 90° corner. */
 const LANES = [-1.82, 0, 1.82];
-/** Forward run speed (m/s-ish); higher = snappier lane dodging. */
-const FORWARD_SPEED = 18;
+/** Forward run speed (m/s-ish) for touch / 1h / 2h — full tilt. */
+const FORWARD_SPEED = 11;
 const LANE_SMOOTH = 14;
 const PLAYER_HALF = new CANNON.Vec3(0.28, 0.88, 0.24);
 /** Top Y of runway collider — must match ground tile `body.position.y` + box half Y in `buildGroundTiles` / `recycleGroundTiles`. */
@@ -37,17 +37,42 @@ const DIR_ASSETS = "./assets/";
 const DIR_PLACEHOLDERS = `${DIR_ASSETS}placeholders/`;
 
 const LEVEL1_END_VIDEO_SRC = `${DIR_ANIM}level1-end.mp4`;
-/** Canonical neighbourhood model (grey in {@link applyNeighbourhoodGrayMaterials}); same-origin GLB first, then GitHub raw. */
-const NEIGHBOURHOOD_CITY_GLB_REMOTE =
-  "https://raw.githubusercontent.com/iflipbrands/SkyHustle/main/environment/neighbourhood_city_modular_lowpoly.glb";
-const NEIGHBOURHOOD_CITY_GLB_LOCAL = `${DIR_ENV}neighbourhood_city_modular_lowpoly.glb`;
-const NEIGHBOURHOOD_CITY_GLB_URLS = [NEIGHBOURHOOD_CITY_GLB_LOCAL, NEIGHBOURHOOD_CITY_GLB_REMOTE];
-/** Three.js fill behind the 3D layer — neutral gray (not HTML purple); canvas is opaque. */
-const RUN_SCENE_BACKGROUND = 0x6a6f78;
-/** Solid gray for all neighbourhood meshes (high emissive so they read without strong sun). */
-const NEIGHBOURHOOD_BUILDING_GRAY = 0x9a9ea5;
-/** Extra scale on imported neighbourhood so streets read huge vs. character (re-grounded after). */
-const NEIGHBOURHOOD_SCALE_BOOST = 3.35;
+/** Set true to play the level-complete video again; false = stats overlay only (faster iteration). */
+const LEVEL1_END_VIDEO_ENABLED = false;
+/** When {@link LEVEL1_END_VIDEO_ENABLED} is false, time on end overlay before return to menu (ms). */
+const LEVEL1_END_OVERLAY_MIN_MS_NO_VIDEO = 4000;
+/** Active world backdrop GLB (materials in {@link applyNeighbourhoodBuildingMaterials}); local first, then GitHub raw. */
+const NEIGHBOURHOOD_WORLD_GLB = "neighbourhood_city_modular_lowpoly.glb";
+const NEIGHBOURHOOD_WORLD_GLB_FALLBACK = "sports_car_racing_paris.glb";
+const NEIGHBOURHOOD_CITY_GLB_URLS = [
+  `${DIR_ENV}${NEIGHBOURHOOD_WORLD_GLB}`,
+  `${DIR_ENV}${NEIGHBOURHOOD_WORLD_GLB_FALLBACK}`,
+  `https://raw.githubusercontent.com/iflipbrands/SkyHustle/main/environment/${NEIGHBOURHOOD_WORLD_GLB}`,
+  `https://raw.githubusercontent.com/iflipbrands/SkyHustle/main/environment/${NEIGHBOURHOOD_WORLD_GLB_FALLBACK}`,
+];
+/** Flat asphalt tint when {@link RUNWAY_ASPHALT_MAP} is missing. */
+const NEIGHBOURHOOD_ASPHALT_COLOR = 0x2a2d32;
+/** Multiplier on textured asphalt — darkens the road map toward charcoal grey. */
+const NEIGHBOURHOOD_ASPHALT_TINT = 0x5c6068;
+/** Clear-color fallback (horizon) when the sky dome has not drawn yet. */
+const RUN_SCENE_BACKGROUND = 0xff7a4a;
+/** Sunset gradient stops (bottom → top). */
+const SUNSET_SKY_HORIZON = 0xff7a4a;
+const SUNSET_SKY_LOW = 0xff5a6e;
+const SUNSET_SKY_MID = 0xc94d8a;
+const SUNSET_SKY_HIGH = 0x6b4a9e;
+const SUNSET_SKY_ZENITH = 0x2a3a72;
+/** Red brick facade (shared material on many meshes). */
+const NEIGHBOURHOOD_BRICK_RED = 0x8f3d38;
+/** Tan / buff brick facade. */
+const NEIGHBOURHOOD_BRICK_TAN = 0xc8ae86;
+/** Window glass / frames read as black. */
+const NEIGHBOURHOOD_WINDOW_BLACK = 0x0a0a0c;
+/**
+ * Applied after fitting the GLB into {@link NEIGHBOURHOOD_RUN_WIDTH} × {@link NEIGHBOURHOOD_RUN_LENGTH}.
+ * Post-fit uniform scale on the backdrop GLB (linear size ∝ this value).
+ */
+const NEIGHBOURHOOD_SCALE_BOOST = 17.4;
 /** Minimum time the level-end overlay stays up (video + tint + copy), ms. */
 const LEVEL1_END_MIN_DURATION_MS = 12000;
 /** Player spawn +Z at level run start. */
@@ -59,8 +84,10 @@ const NEIGHBOURHOOD_SPAWN_LEAD_Z = 18;
  * (covers ribbon, gap, and landing band in world +Z).
  */
 const NEIGHBOURHOOD_RUN_LENGTH = Math.max(520, LEVEL1_LAND_COMPLETE_MIN_Z + 160);
-/** Target width (m) when fitting the modular neighbourhood to the running band. */
-const NEIGHBOURHOOD_RUN_WIDTH = 24;
+/**
+ * Cross-run fit (m): ~3 vehicle lanes; slightly tighter than 42 m so scale + alignment match the GLB street.
+ */
+const NEIGHBOURHOOD_RUN_WIDTH = 30;
 /** Looping run music (respects Music on/off in settings). */
 const GAME_MUSIC_SRC = `${DIR_AUDIO}ceezandray_gamemusic.mp3`;
 const TILE_Z = 10;
@@ -79,6 +106,12 @@ const DUMPSTER_FBX_CANDIDATES = [`${DIR_ENV}dumpster.fbx`];
 const TRASHCAN_DIFFUSE = `${DIR_ASSETS}trashcan/diffuse.jpg`;
 const TRASHCAN_BUMP = `${DIR_ASSETS}trashcan/bump.jpg`;
 const TRASHCAN_SPEC = `${DIR_ASSETS}trashcan/spec.jpg`;
+/** Seamless asphalt texture for the visible runway under the player. */
+const RUNWAY_ASPHALT_MAP = `${DIR_ASSETS}asphalt_road.png`;
+/** Brick running-bond facade for walls / buildings. */
+const NEIGHBOURHOOD_BRICK_MAP = `${DIR_ASSETS}brick_wall.png`;
+/** Painted sunset sky (author art) — {@link scene.background}. */
+const SKY_BACKGROUND_MAP = `${DIR_ASSETS}sky_sunset.png`;
 const INVINCIBLE_MS = 2200;
 const ACTION_COOLDOWN_MS = 220;
 /** Second left/right tap within this window → 90° corner (no extra lane step). */
@@ -103,14 +136,8 @@ const CAMERA_LOOK_AHEAD = 8.8;
 const CAMERA_LOOK_HEIGHT_OFFSET = 0.64;
 /** Chase cam eases behind heading after hard turns (0–1 per frame; higher = snappier). */
 const CAMERA_BEHIND_SMOOTH = 0.2;
-/** KB: hold ←/→ to curve (small yaw) without a 90° corner. */
-const KB_ARROW_SOFT_RATE = 1.05;
-const KB_ARROW_STEER_MAX = 0.44;
-const KB_ARROW_STEER_DECAY = 3.2;
-/** KB: after a quick second tap on ←/→, hold to snap a hard 90°. */
-const KB_HARD_TURN_RATE = 3.05;
-/** Max ms between tap release and next tap to count as double-tap (arms hard corner). */
-const KB_ARROW_DBL_MS = 340;
+/** KB: while ←/→ is held, turn rate along the run (rad/s); smooth curve, no double-tap. */
+const KB_HOLD_CURVE_RATE = 0.42;
 
 const CEEZ_OBJ_DIR = `${DIR_CHAR}Ceez/`;
 const CEEZ_OBJ_FILE = "ceez.obj";
@@ -186,7 +213,6 @@ const _rayWorld = new THREE.Vector3();
 const SEED_BURST_COUNT = 7;
 
 const canvas = document.getElementById("game-canvas");
-const worldLoadingOverlay = document.getElementById("world-loading-overlay");
 /** So keyboard reaches the game instead of staying on a hidden input or menu control. */
 if (canvas) {
   canvas.tabIndex = 0;
@@ -272,9 +298,9 @@ const _camLook = new THREE.Vector3();
 const cameraSmoothedForward = new THREE.Vector3(0, 0, 1);
 /** World Y rotation of the run (radians). 0 = forward +world Z; +π/2 = forward +world X. Derived from committed + steer. */
 let worldRunYaw = 0;
-/** Cardinal heading (multiples of π/2 after snaps); {@link yawSteer} adds soft carve in KB mode. */
+/** Cardinal heading; arrow-hold in KB mode integrates here for a continuous curve. */
 let committedRunYaw = 0;
-/** Soft carve offset (radians), clamped ±{@link KB_ARROW_STEER_MAX}. */
+/** Extra yaw offset (used by non-KB turns); KB arrow mode keeps this at 0. */
 let yawSteer = 0;
 /** XZ origin for lane offsets: lateral = dot(P − runOrigin, runRight). Updated on 90° turns. */
 const runOrigin = new THREE.Vector3(0, 0, 0);
@@ -316,6 +342,17 @@ let level1WinScore = 0;
 let runSegment = "rooftop";
 /** Grey deck under the lanes — physics tiles have no mesh; this is what you “run on”. */
 let visibleRunwayPlane = null;
+/** Seamless asphalt from {@link RUNWAY_ASPHALT_MAP}. */
+let runwayAsphaltTex = null;
+/** Loaded sky image for {@link THREE.Scene.background}. */
+let skyBackgroundImageTex = null;
+/** Procedural gradient if {@link SKY_BACKGROUND_MAP} fails to load. */
+let skyBackgroundFallbackTex = null;
+/** Warm key light that follows the run so facades stay readable. */
+let runFacadeLight = null;
+let runFillLight = null;
+/** Brick wall diffuse from {@link NEIGHBOURHOOD_BRICK_MAP}. */
+let neighbourhoodBrickTex = null;
 /** Large flat Cannon slab so strafing / 90° turns stay on collider (narrow recycled tiles are +Z only). */
 let neighbourhoodWideGroundBody = null;
 /** Imported modular neighbourhood (visible after {@link buildNeighbourhoodWorld}). */
@@ -341,14 +378,14 @@ let laneIndex = 1;
 let laneNavLastLeftMs = 0;
 let laneNavLastRightMs = 0;
 let lastWorldRunTurnAtMs = 0;
-/** KB (only): arrow hold state + double-tap hard corner. */
+/** Prevents double-start when both click + pointer fire on “Enter Level 1”. */
+let tryEnterLevelFromPrelevelInFlight = false;
+/** KB (only): ←/→ hold for curve steering. */
 let kbArrowLeftDown = false;
 let kbArrowRightDown = false;
-let kbLeftPrevUpMs = 0;
-let kbRightPrevUpMs = 0;
-/** 0 = none, 1 = hard left in progress, −1 = hard right. */
-let kbHardTurnDir = 0;
-let kbHardTargetYaw = 0;
+/** KB: ↑ or W held = move forward (no auto-run). */
+let kbArrowUpHeld = false;
+let kbKeyWHeld = false;
 /** @type {Promise<void> | null} */
 let neighbourhoodLoadPromise = null;
 let coins = 0;
@@ -1524,18 +1561,24 @@ function setPrelevelMeta(message) {
   prelevelMeta.textContent = message || "";
 }
 
+function getWorldLoadingOverlayEl() {
+  return document.getElementById("world-loading-overlay");
+}
+
 function showWorldLoadingOverlay() {
-  if (!worldLoadingOverlay) return;
-  worldLoadingOverlay.classList.remove("hidden");
-  worldLoadingOverlay.classList.add("flex");
-  worldLoadingOverlay.setAttribute("aria-busy", "true");
+  const el = getWorldLoadingOverlayEl();
+  if (!el) return;
+  el.classList.remove("hidden");
+  el.classList.add("flex");
+  el.setAttribute("aria-busy", "true");
 }
 
 function hideWorldLoadingOverlay() {
-  if (!worldLoadingOverlay) return;
-  worldLoadingOverlay.classList.add("hidden");
-  worldLoadingOverlay.classList.remove("flex");
-  worldLoadingOverlay.setAttribute("aria-busy", "false");
+  const el = getWorldLoadingOverlayEl();
+  if (!el) return;
+  el.classList.add("hidden");
+  el.classList.remove("flex");
+  el.setAttribute("aria-busy", "false");
 }
 
 function getPrelevelNameTrimmed() {
@@ -1550,6 +1593,8 @@ function syncEnterLevel1Button() {
 }
 
 async function tryEnterLevelFromPrelevel() {
+  if (tryEnterLevelFromPrelevelInFlight) return;
+  tryEnterLevelFromPrelevelInFlight = true;
   const typed = getPrelevelNameTrimmed();
   const saved = readPlayerName();
   const name = typed || saved || "Player";
@@ -1565,6 +1610,7 @@ async function tryEnterLevelFromPrelevel() {
     setPrelevelMeta(`Start failed: ${err?.message || err}`);
   } finally {
     hideWorldLoadingOverlay();
+    tryEnterLevelFromPrelevelInFlight = false;
   }
 }
 
@@ -1713,11 +1759,66 @@ function updateCamera() {
   _camLook.copy(p).addScaledVector(cameraSmoothedForward, lookAhead);
   _camLook.y += lookYOffset;
   camera.lookAt(_camLook);
+  syncRunEnvironmentLights();
+}
+
+function getSkyBackgroundFallbackTexture() {
+  if (skyBackgroundFallbackTex) return skyBackgroundFallbackTex;
+  const canvas = document.createElement("canvas");
+  canvas.width = 4;
+  canvas.height = 512;
+  const ctx = canvas.getContext("2d");
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  grad.addColorStop(0, "#2a3a72");
+  grad.addColorStop(0.28, "#6b4a9e");
+  grad.addColorStop(0.5, "#c94d8a");
+  grad.addColorStop(0.72, "#ff5a6e");
+  grad.addColorStop(1, "#ff7a4a");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  skyBackgroundFallbackTex = new THREE.CanvasTexture(canvas);
+  skyBackgroundFallbackTex.colorSpace = THREE.SRGBColorSpace;
+  skyBackgroundFallbackTex.needsUpdate = true;
+  return skyBackgroundFallbackTex;
+}
+
+function getSunsetSkyBackgroundTexture() {
+  return skyBackgroundImageTex || getSkyBackgroundFallbackTexture();
+}
+
+async function tryLoadSkyBackgroundOnce() {
+  if (skyBackgroundImageTex) return;
+  try {
+    const t = await new THREE.TextureLoader().loadAsync(SKY_BACKGROUND_MAP);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.mapping = THREE.UVMapping;
+    skyBackgroundImageTex = t;
+    applyRunSceneBackdrop();
+  } catch (err) {
+    console.warn("[Sky] Background image failed", err);
+  }
+}
+
+/** Move run lights with the player so brick / street materials stay lit. */
+function syncRunEnvironmentLights() {
+  if (!playerRoot) return;
+  const p = playerRoot.position;
+  const F = cameraSmoothedForward.lengthSq() > 1e-8 ? cameraSmoothedForward : _runForward;
+  if (runFacadeLight) {
+    runFacadeLight.position.set(p.x - F.x * 10 + 8, p.y + 22, p.z - F.z * 10 + 14);
+    runFacadeLight.target.position.set(p.x + F.x * 48, p.y + 6, p.z + F.z * 48);
+    runFacadeLight.target.updateMatrixWorld();
+  }
+  if (runFillLight) {
+    runFillLight.position.set(p.x + F.x * 6, p.y + 10, p.z + F.z * 6 - 16);
+    runFillLight.target.position.set(p.x, p.y + 2, p.z);
+    runFillLight.target.updateMatrixWorld();
+  }
 }
 
 function initThree() {
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(RUN_SCENE_BACKGROUND);
+  scene.background = getSunsetSkyBackgroundTexture();
   scene.fog = null;
 
   camera = new THREE.PerspectiveCamera(70, 1, 0.35, 20000);
@@ -1734,12 +1835,12 @@ function initThree() {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   /** Lower = less highlight wash on character albedo (was 1.42). */
-  renderer.toneMappingExposure = 1.28;
+  renderer.toneMappingExposure = 1.38;
 
-  const hemi = new THREE.HemisphereLight(0xffdcc8, 0x4a3a52, 0.92);
+  const hemi = new THREE.HemisphereLight(0xffd8b8, 0x6a5878, 1.35);
   scene.add(hemi);
-  const sun = new THREE.DirectionalLight(0xffead8, 1.55);
-  sun.position.set(-8, 22, 14);
+  const sun = new THREE.DirectionalLight(0xffd0a8, 1.85);
+  sun.position.set(-14, 18, 18);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.camera.near = 1;
@@ -1749,12 +1850,22 @@ function initThree() {
   sun.shadow.camera.top = 220;
   sun.shadow.camera.bottom = -220;
   scene.add(sun);
-  const fill = new THREE.DirectionalLight(0xfff4ea, 0.38);
-  fill.position.set(10, 11, -7);
+  const fill = new THREE.DirectionalLight(0xfff0e0, 0.72);
+  fill.position.set(10, 14, -7);
   scene.add(fill);
 
-  const ambient = new THREE.AmbientLight(0xd4c4dc, 0.32);
+  const ambient = new THREE.AmbientLight(0xffe8f0, 0.55);
   scene.add(ambient);
+
+  runFacadeLight = new THREE.DirectionalLight(0xfff4e8, 1.45);
+  runFacadeLight.castShadow = false;
+  scene.add(runFacadeLight);
+  scene.add(runFacadeLight.target);
+
+  runFillLight = new THREE.DirectionalLight(0xffc8a0, 0.65);
+  runFillLight.castShadow = false;
+  scene.add(runFillLight);
+  scene.add(runFillLight.target);
 
   // Visible runway deck added in {@link ensureVisibleRunwayPlane}; physics tiles stay invisible.
 
@@ -2011,17 +2122,19 @@ function hideLevel1EndOverlay() {
     level1EndVideo.pause();
     level1EndVideo.currentTime = 0;
     level1EndVideo.onended = null;
+    level1EndVideo.classList.remove("hidden");
   }
 }
 
-/** After video ends (or errors), wait until {@link LEVEL1_END_MIN_DURATION_MS} from reveal, then menu. */
+/** After video ends (or no video), wait until minimum overlay time from reveal, then menu. */
 function scheduleLevel1EndReturnToMenu() {
   if (level1EndFinishTimer) {
     clearTimeout(level1EndFinishTimer);
     level1EndFinishTimer = 0;
   }
   const elapsed = performance.now() - level1EndRevealStartedAtMs;
-  const wait = Math.max(0, LEVEL1_END_MIN_DURATION_MS - elapsed);
+  const minDur = LEVEL1_END_VIDEO_ENABLED ? LEVEL1_END_MIN_DURATION_MS : LEVEL1_END_OVERLAY_MIN_MS_NO_VIDEO;
+  const wait = Math.max(0, minDur - elapsed);
   level1EndFinishTimer = window.setTimeout(() => {
     level1EndFinishTimer = 0;
     hideLevel1EndOverlay();
@@ -2051,7 +2164,8 @@ function showLevel1EndOverlayBeginning() {
     });
   });
 
-  if (level1EndVideo) {
+  if (LEVEL1_END_VIDEO_ENABLED && level1EndVideo) {
+    level1EndVideo.classList.remove("hidden");
     level1EndVideo.muted = true;
     level1EndVideo.defaultMuted = true;
     level1EndVideo.volume = 0;
@@ -2066,6 +2180,12 @@ function showLevel1EndOverlayBeginning() {
       scheduleLevel1EndReturnToMenu();
     });
   } else {
+    if (level1EndVideo) {
+      level1EndVideo.pause();
+      level1EndVideo.removeAttribute("src");
+      level1EndVideo.load?.();
+      level1EndVideo.classList.add("hidden");
+    }
     scheduleLevel1EndReturnToMenu();
   }
 }
@@ -2281,121 +2401,63 @@ function wrapAnglePi(ang) {
   return ((((ang + Math.PI) % twoPi) + twoPi) % twoPi) - Math.PI;
 }
 
+function kbForwardHeld() {
+  return kbArrowUpHeld || kbKeyWHeld;
+}
+
 function resetKbSteeringState() {
   kbArrowLeftDown = false;
   kbArrowRightDown = false;
-  kbLeftPrevUpMs = 0;
-  kbRightPrevUpMs = 0;
-  kbHardTurnDir = 0;
-  kbHardTargetYaw = 0;
+  kbArrowUpHeld = false;
+  kbKeyWHeld = false;
 }
 
 function onKbLeftArrowDown() {
   kbArrowLeftDown = true;
-  const now = performance.now();
-  if (kbLeftPrevUpMs > 0 && now - kbLeftPrevUpMs < KB_ARROW_DBL_MS) {
-    kbLeftPrevUpMs = 0;
-    const eff = committedRunYaw + yawSteer;
-    kbHardTargetYaw = eff + Math.PI / 2;
-    committedRunYaw = eff;
-    yawSteer = 0;
-    kbHardTurnDir = 1;
-    syncWorldRunYawFromParts();
-  }
 }
 
 function onKbLeftArrowUp() {
   kbArrowLeftDown = false;
-  kbLeftPrevUpMs = performance.now();
-  if (kbHardTurnDir === 1) {
-    const eff = committedRunYaw + yawSteer;
-    if (Math.abs(kbHardTargetYaw - eff) > 0.12) {
-      const q = Math.PI / 2;
-      committedRunYaw = Math.round(eff / q) * q;
-      yawSteer = 0;
-      _tmpFold.copy(_runForward);
-      syncWorldRunYawFromParts();
-      updateRunBasisVectors();
-      reanchorRunOriginAfterTurn(_tmpFold);
-    }
-    kbHardTurnDir = 0;
-  }
 }
 
 function onKbRightArrowDown() {
   kbArrowRightDown = true;
-  const now = performance.now();
-  if (kbRightPrevUpMs > 0 && now - kbRightPrevUpMs < KB_ARROW_DBL_MS) {
-    kbRightPrevUpMs = 0;
-    const eff = committedRunYaw + yawSteer;
-    kbHardTargetYaw = eff - Math.PI / 2;
-    committedRunYaw = eff;
-    yawSteer = 0;
-    kbHardTurnDir = -1;
-    syncWorldRunYawFromParts();
-  }
 }
 
 function onKbRightArrowUp() {
   kbArrowRightDown = false;
-  kbRightPrevUpMs = performance.now();
-  if (kbHardTurnDir === -1) {
-    const eff = committedRunYaw + yawSteer;
-    if (Math.abs(kbHardTargetYaw - eff) > 0.12) {
-      const q = Math.PI / 2;
-      committedRunYaw = Math.round(eff / q) * q;
-      yawSteer = 0;
-      _tmpFold.copy(_runForward);
-      syncWorldRunYawFromParts();
-      updateRunBasisVectors();
-      reanchorRunOriginAfterTurn(_tmpFold);
-    }
-    kbHardTurnDir = 0;
-  }
 }
 
 /**
- * Keyboard mode: hold ←/→ to curve (yaw steer); double-tap then same arrow + hold for a 90° snap.
+ * Keyboard mode: hold ←/→ to curve the run continuously (yaw integrates while held).
  */
 function applyKbArrowSteering(dt) {
   if (getControlMode() !== "kb" || state !== "playing" || runPaused) return;
   if (level1VictoryFreeze || level1EndCinematicStarted) return;
+  if (!playerBody) return;
 
-  if (kbHardTurnDir !== 0) {
-    const diff = kbHardTargetYaw - committedRunYaw;
-    const holdOk =
-      (kbHardTurnDir === 1 && kbArrowLeftDown && !kbArrowRightDown) ||
-      (kbHardTurnDir === -1 && kbArrowRightDown && !kbArrowLeftDown);
-    if (holdOk) {
-      if (Math.abs(diff) < 0.04) {
-        _tmpFold.copy(_runForward);
-        committedRunYaw = kbHardTargetYaw;
-        committedRunYaw = wrapAnglePi(committedRunYaw);
-        yawSteer = 0;
-        syncWorldRunYawFromParts();
-        updateRunBasisVectors();
-        reanchorRunOriginAfterTurn(_tmpFold);
-        kbHardTurnDir = 0;
-        lastWorldRunTurnAtMs = performance.now();
-      } else {
-        const step = Math.sign(diff) * Math.min(KB_HARD_TURN_RATE * dt, Math.abs(diff));
-        committedRunYaw += step;
-        syncWorldRunYawFromParts();
-      }
-    }
-    return;
-  }
-
-  if (kbArrowLeftDown && !kbArrowRightDown) {
-    yawSteer = Math.min(KB_ARROW_STEER_MAX, yawSteer + KB_ARROW_SOFT_RATE * dt);
-  } else if (kbArrowRightDown && !kbArrowLeftDown) {
-    yawSteer = Math.max(-KB_ARROW_STEER_MAX, yawSteer - KB_ARROW_SOFT_RATE * dt);
+  const forwardHeld = kbForwardHeld();
+  if (forwardHeld && kbArrowLeftDown && !kbArrowRightDown) {
+    _tmpFold.copy(_runForward);
+    committedRunYaw += KB_HOLD_CURVE_RATE * dt;
+    committedRunYaw = wrapAnglePi(committedRunYaw);
+    yawSteer = 0;
+    syncWorldRunYawFromParts();
+    updateRunBasisVectors();
+    reanchorRunOriginAfterTurn(_tmpFold);
+  } else if (forwardHeld && kbArrowRightDown && !kbArrowLeftDown) {
+    _tmpFold.copy(_runForward);
+    committedRunYaw -= KB_HOLD_CURVE_RATE * dt;
+    committedRunYaw = wrapAnglePi(committedRunYaw);
+    yawSteer = 0;
+    syncWorldRunYawFromParts();
+    updateRunBasisVectors();
+    reanchorRunOriginAfterTurn(_tmpFold);
   } else {
-    const k = Math.exp(-KB_ARROW_STEER_DECAY * dt);
-    yawSteer *= k;
+    yawSteer *= Math.exp(-6 * dt);
     if (Math.abs(yawSteer) < 0.004) yawSteer = 0;
+    syncWorldRunYawFromParts();
   }
-  syncWorldRunYawFromParts();
 }
 
 function updateRunBasisVectors() {
@@ -2605,12 +2667,13 @@ function ensureNeighbourhoodWideGroundPhysics() {
   }
 }
 
-/** Opaque neutral backdrop + no fog so huge grey city is not clipped to “empty purple”. */
+/** Sunset sky image (or gradient fallback) + no fog so the city backdrop stays visible. */
 function applyRunSceneBackdrop() {
   if (!scene || !renderer) return;
-  scene.background = new THREE.Color(RUN_SCENE_BACKGROUND);
+  scene.background = getSunsetSkyBackgroundTexture();
+  scene.backgroundIntensity = 1.12;
   scene.fog = null;
-  renderer.setClearColor(RUN_SCENE_BACKGROUND, 1);
+  renderer.setClearColor(SUNSET_SKY_HORIZON, 1);
 }
 
 /** Main menu / leave run — same backdrop; neighbourhood stays visible. */
@@ -2633,19 +2696,112 @@ function getActiveRunSurfaceY() {
   return RUNWAY_SURFACE_Y;
 }
 
+async function tryLoadRunwayAsphaltOnce() {
+  if (runwayAsphaltTex) return;
+  try {
+    const t = await new THREE.TextureLoader().loadAsync(RUNWAY_ASPHALT_MAP);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = Math.min(8, renderer?.capabilities?.getMaxAnisotropy?.() ?? 4);
+    runwayAsphaltTex = t;
+  } catch (err) {
+    console.warn("[Runway] Asphalt texture failed", err);
+  }
+}
+
+async function tryLoadNeighbourhoodBrickOnce() {
+  if (neighbourhoodBrickTex) return;
+  try {
+    const t = await new THREE.TextureLoader().loadAsync(NEIGHBOURHOOD_BRICK_MAP);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = Math.min(8, renderer?.capabilities?.getMaxAnisotropy?.() ?? 4);
+    neighbourhoodBrickTex = t;
+  } catch (err) {
+    console.warn("[World] Brick texture failed", err);
+  }
+}
+
+/** Asphalt + brick — call before neighbourhood build or runway deck. */
+async function tryLoadNeighbourhoodSurfaceTexturesOnce() {
+  await Promise.all([
+    tryLoadRunwayAsphaltOnce(),
+    tryLoadNeighbourhoodBrickOnce(),
+    tryLoadSkyBackgroundOnce(),
+  ]);
+}
+
+/** Textured or flat asphalt for streets + runway deck. */
+function makeNeighbourhoodAsphaltMaterial(repeatU, repeatV) {
+  if (runwayAsphaltTex) {
+    const map = runwayAsphaltTex.clone();
+    map.wrapS = map.wrapT = THREE.RepeatWrapping;
+    map.repeat.set(repeatU, repeatV);
+    map.colorSpace = THREE.SRGBColorSpace;
+    return new THREE.MeshStandardMaterial({
+      map,
+      color: NEIGHBOURHOOD_ASPHALT_TINT,
+      roughness: 0.96,
+      metalness: 0.02,
+      emissive: new THREE.Color(0x2a2c32),
+      emissiveIntensity: 0.14,
+      side: THREE.DoubleSide,
+      depthWrite: true,
+      depthTest: true,
+    });
+  }
+  return new THREE.MeshStandardMaterial({
+    color: NEIGHBOURHOOD_ASPHALT_COLOR,
+    roughness: 0.96,
+    metalness: 0.02,
+    emissive: new THREE.Color(0x14161a),
+    emissiveIntensity: 0.08,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    depthTest: true,
+  });
+}
+
+/** Running-bond brick for facades; `colorTint` varies buildings slightly. */
+function makeNeighbourhoodBrickMaterial(repeatU, repeatV, colorTint = 0xffffff) {
+  if (neighbourhoodBrickTex) {
+    const map = neighbourhoodBrickTex.clone();
+    map.wrapS = map.wrapT = THREE.RepeatWrapping;
+    map.repeat.set(repeatU, repeatV);
+    map.colorSpace = THREE.SRGBColorSpace;
+    return new THREE.MeshStandardMaterial({
+      map,
+      color: colorTint,
+      roughness: 0.82,
+      metalness: 0.02,
+      emissive: new THREE.Color(0x5a4038),
+      emissiveIntensity: 0.28,
+      side: THREE.DoubleSide,
+      depthWrite: true,
+      depthTest: true,
+    });
+  }
+  const fallback =
+    colorTint === 0xffffff ? NEIGHBOURHOOD_BRICK_RED : NEIGHBOURHOOD_BRICK_TAN;
+  return new THREE.MeshStandardMaterial({
+    color: fallback,
+    roughness: 0.92,
+    metalness: 0.04,
+    emissive: new THREE.Color(0x3a1816),
+    emissiveIntensity: 0.18,
+    flatShading: true,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    depthTest: true,
+  });
+}
+
 /** Wide grey plane under the run — follows the player in +Z (physics slabs have no render mesh). */
 function ensureVisibleRunwayPlane() {
   if (visibleRunwayPlane || !scene) return;
-  const geo = new THREE.PlaneGeometry(56, 420);
+  const geo = new THREE.PlaneGeometry(80, 520);
   geo.rotateX(-Math.PI / 2);
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x5a5e66,
-    roughness: 0.94,
-    metalness: 0.02,
-    emissive: new THREE.Color(0x2e3035),
-    emissiveIntensity: 0.35,
-    side: THREE.DoubleSide,
-  });
+  const mat = makeNeighbourhoodAsphaltMaterial(22, 145);
   visibleRunwayPlane = new THREE.Mesh(geo, mat);
   visibleRunwayPlane.receiveShadow = true;
   visibleRunwayPlane.name = "visibleRunwayDeck";
@@ -2711,22 +2867,172 @@ function fitNeighbourhoodToAlley(root, targetWidth, targetLength) {
   root.updateMatrixWorld(true);
 }
 
+/** Mesh / material / ancestor names that usually mean glazing in modular city kits. */
+const NEIGHBOURHOOD_WINDOW_NAME_RE =
+  /window|glass|glaz|pane|curtain|storefront|fenestr|skylight|vitro|disp(win|lay)|_win|win_|facade_glass/i;
+
+/** Traffic / vehicles / street hardware / trees — keep off brick palette. */
+const NEIGHBOURHOOD_PROP_NAME_RE =
+  /(^|[^A-Za-z0-9])(SM_|_gltfNode_)|traffic|barricade|barrier|cone|delineator|bmw|streetlight|solar|sketchfab_model\.0\d\d|split_ac|acer_|_lod2_|pot_\d|sketchfab_model/i;
+
+/** Planters / street trees in the modular city kit. */
+const NEIGHBOURHOOD_FOLIAGE_NAME_RE = /acer_|foliage|tree|bark|cluster_mat|pot_\d/i;
+
+/** Facade masonry from modular `Wall_*` nodes. */
+const NEIGHBOURHOOD_WALL_NAME_RE = /\bwall\b|wall_\d|wall\./i;
+
+function collectNeighbourhoodMeshMaterialNames(mesh) {
+  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  const names = [];
+  for (let i = 0; i < mats.length; i++) {
+    const m = mats[i];
+    if (m && m.name) names.push(String(m.name));
+  }
+  return names.join(" ");
+}
+
+/** GLB node names are often on parents; mesh names stay `Object_N`. */
+function collectNeighbourhoodAncestorNames(mesh, maxDepth = 14) {
+  const names = [];
+  let p = mesh.parent;
+  let d = 0;
+  while (p && d < maxDepth) {
+    if (p.name) names.push(p.name);
+    p = p.parent;
+    d += 1;
+  }
+  return names.join(" ");
+}
+
+function neighbourhoodNameBlob(mesh) {
+  return `${mesh.name} ${collectNeighbourhoodAncestorNames(mesh)} ${collectNeighbourhoodMeshMaterialNames(
+    mesh
+  )}`;
+}
+
+function isNeighbourhoodWindowMesh(mesh) {
+  return NEIGHBOURHOOD_WINDOW_NAME_RE.test(neighbourhoodNameBlob(mesh));
+}
+
+function isNeighbourhoodStreetPropMesh(mesh) {
+  const blob = neighbourhoodNameBlob(mesh);
+  if (NEIGHBOURHOOD_FOLIAGE_NAME_RE.test(blob)) return false;
+  if (NEIGHBOURHOOD_PROP_NAME_RE.test(blob)) return true;
+  if (/streetlight/i.test(collectNeighbourhoodMeshMaterialNames(mesh))) return true;
+  return false;
+}
+
+function isNeighbourhoodFoliageMesh(mesh) {
+  return NEIGHBOURHOOD_FOLIAGE_NAME_RE.test(neighbourhoodNameBlob(mesh));
+}
+
+function isNeighbourhoodWallMesh(mesh) {
+  return NEIGHBOURHOOD_WALL_NAME_RE.test(neighbourhoodNameBlob(mesh));
+}
+
+/** Road / track meshes: used to center the scene on the run axis and match run surface height. */
+function isNeighbourhoodRoadLikeMesh(mesh) {
+  return /road|street|asphalt|pavement|racetrack|track|lane|tarmac|highway|boulevard|modular_road|drivable|grid|route|piste|circuit|terrain|sol\b|rue|drive|parking|sidewalk|curb/i.test(
+    neighbourhoodNameBlob(mesh)
+  );
+}
+
+/** Shift `root` in X so detected road geometry is centered on world X = 0 (player run strip). */
+function offsetNeighbourhoodSoRoadCentersOnRunAxis(root) {
+  root.updateMatrixWorld(true);
+  const union = new THREE.Box3();
+  let hit = false;
+  root.traverse((o) => {
+    if (!o.isMesh && !o.isInstancedMesh) return;
+    if (!isNeighbourhoodRoadLikeMesh(o)) return;
+    const b = new THREE.Box3().setFromObject(o);
+    if (b.isEmpty()) return;
+    if (!hit) {
+      union.copy(b);
+      hit = true;
+    } else union.union(b);
+  });
+  if (!hit) return;
+  const cx = (union.min.x + union.max.x) * 0.5;
+  root.position.x -= cx;
+  root.updateMatrixWorld(true);
+}
+
 /**
- * One shared gray material for the whole modular city (no vertex colors — avoids invisible / wrong-tint meshes).
- * Emissive + double side so it reads even when shadowed or normals are odd.
+ * Move `hood` vertically so the top of road-like geometry lines up with {@link RUNWAY_SURFACE_Y}
+ * (player feet / physics deck).
  */
-function applyNeighbourhoodGrayMaterials(root) {
-  const mat = new THREE.MeshStandardMaterial({
-    color: NEIGHBOURHOOD_BUILDING_GRAY,
-    roughness: 0.9,
-    metalness: 0.03,
-    emissive: new THREE.Color(0x3a3d42),
-    emissiveIntensity: 0.62,
+function alignNeighbourhoodRoadTopToRunSurfaceY(hoodParent, hood) {
+  hoodParent.updateMatrixWorld(true);
+  const union = new THREE.Box3();
+  let hit = false;
+  hood.traverse((o) => {
+    if (!o.isMesh && !o.isInstancedMesh) return;
+    if (!isNeighbourhoodRoadLikeMesh(o)) return;
+    const b = new THREE.Box3().setFromObject(o);
+    if (b.isEmpty()) return;
+    if (!hit) {
+      union.copy(b);
+      hit = true;
+    } else union.union(b);
+  });
+  if (!hit) return;
+  const dy = RUNWAY_SURFACE_Y - union.max.y;
+  hood.position.y += dy;
+  hoodParent.updateMatrixWorld(true);
+}
+
+/** FNV-1a–style bucket for stable red vs tan per mesh. */
+function neighbourhoodBrickBucket(meshId) {
+  let h = 2166136261;
+  for (let i = 0; i < meshId.length; i++) {
+    h ^= meshId.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h) % 2;
+}
+
+/**
+ * Brick facades (red vs tan) and black windows; strips vertex colors so GLB tints do not fight materials.
+ * Emissive + double side so facades read when shadowed or normals are odd.
+ */
+function applyNeighbourhoodBuildingMaterials(root) {
+  const matBrickA = makeNeighbourhoodBrickMaterial(1.4, 1.4, 0xffffff);
+  const matBrickB = makeNeighbourhoodBrickMaterial(1.4, 1.4, 0xf0e6dc);
+  const matProp = new THREE.MeshStandardMaterial({
+    color: 0x3a3d44,
+    roughness: 0.88,
+    metalness: 0.12,
+    emissive: new THREE.Color(0x1a1c22),
+    emissiveIntensity: 0.12,
     flatShading: true,
     side: THREE.DoubleSide,
     depthWrite: true,
     depthTest: true,
   });
+  const matFoliage = new THREE.MeshStandardMaterial({
+    color: 0x4a6b48,
+    roughness: 0.9,
+    metalness: 0.02,
+    emissive: new THREE.Color(0x1e2e1c),
+    emissiveIntensity: 0.1,
+    flatShading: true,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    depthTest: true,
+  });
+  const matWindow = new THREE.MeshStandardMaterial({
+    color: NEIGHBOURHOOD_WINDOW_BLACK,
+    roughness: 0.42,
+    metalness: 0.18,
+    emissive: new THREE.Color(0x000000),
+    emissiveIntensity: 0,
+    flatShading: true,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    depthTest: true,
+  });
+  const matRoad = makeNeighbourhoodAsphaltMaterial(10, 10);
   root.updateMatrixWorld(true);
   root.traverse((obj) => {
     if (!obj.isMesh && !obj.isInstancedMesh) return;
@@ -2735,6 +3041,20 @@ function applyNeighbourhoodGrayMaterials(root) {
       if (geo.attributes.color) geo.deleteAttribute("color");
       if (!geo.attributes.normal) geo.computeVertexNormals();
     }
+    let mat;
+    if (isNeighbourhoodRoadLikeMesh(obj)) {
+      mat = matRoad;
+    } else if (isNeighbourhoodWindowMesh(obj)) {
+      mat = matWindow;
+    } else if (isNeighbourhoodFoliageMesh(obj)) {
+      mat = matFoliage;
+    } else if (isNeighbourhoodStreetPropMesh(obj)) {
+      mat = matProp;
+    } else if (isNeighbourhoodWallMesh(obj)) {
+      mat = neighbourhoodBrickBucket(obj.uuid) === 0 ? matBrickA : matBrickB;
+    } else {
+      mat = neighbourhoodBrickBucket(obj.uuid) === 0 ? matBrickA : matBrickB;
+    }
     obj.material = mat;
     obj.castShadow = true;
     obj.receiveShadow = true;
@@ -2742,19 +3062,14 @@ function applyNeighbourhoodGrayMaterials(root) {
   });
 }
 
-/** If the GLB has no meshes (load fail / empty), add a simple gray strip so the run is never “void purple”. */
+/** If the GLB has no meshes (load fail / empty), add a simple strip so the run is never “void purple”. */
 function addNeighbourhoodFallbackStrip(parent) {
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x7c8088,
-    roughness: 0.88,
-    metalness: 0.02,
-    emissive: new THREE.Color(0x35373c),
-    emissiveIntensity: 0.55,
-    side: THREE.DoubleSide,
-  });
+  const matFloor = makeNeighbourhoodAsphaltMaterial(24, 90);
+  const matLeft = makeNeighbourhoodBrickMaterial(4, 8, 0xffffff);
+  const matRight = makeNeighbourhoodBrickMaterial(4, 8, 0xe8ddd0);
   const len = NEIGHBOURHOOD_RUN_LENGTH;
-  const halfW = 14;
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(halfW * 2 + 20, len), mat);
+  const halfW = Math.max(18, NEIGHBOURHOOD_RUN_WIDTH * 0.45);
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(halfW * 2 + 20, len), matFloor);
   floor.rotation.x = -Math.PI / 2;
   floor.position.set(0, 0.02, len * 0.5);
   floor.name = "neighbourhoodFallbackFloor";
@@ -2762,11 +3077,11 @@ function addNeighbourhoodFallbackStrip(parent) {
   const wallH = 32;
   const wallD = len * 0.95;
   const wallGeo = new THREE.BoxGeometry(5, wallH, wallD);
-  const left = new THREE.Mesh(wallGeo, mat);
+  const left = new THREE.Mesh(wallGeo, matLeft);
   left.position.set(-(halfW + 3.5), wallH * 0.5, len * 0.5);
   left.name = "neighbourhoodFallbackWallL";
   parent.add(left);
-  const right = new THREE.Mesh(wallGeo, mat);
+  const right = new THREE.Mesh(wallGeo, matRight);
   right.position.set(halfW + 3.5, wallH * 0.5, len * 0.5);
   right.name = "neighbourhoodFallbackWallR";
   parent.add(right);
@@ -2783,6 +3098,7 @@ function countDrawableNeighbourhoodMeshes(root) {
 /** Load neighbourhood GLB into scene (idempotent). */
 async function buildNeighbourhoodWorldInternal() {
   if (neighbourhoodWorldGroup) return;
+  await tryLoadNeighbourhoodSurfaceTexturesOnce();
   const g = new THREE.Group();
   g.name = "neighbourhoodWorld";
   let loadedUrl = "";
@@ -2807,14 +3123,15 @@ async function buildNeighbourhoodWorldInternal() {
       }
     });
     fitNeighbourhoodToAlley(hood, NEIGHBOURHOOD_RUN_WIDTH, NEIGHBOURHOOD_RUN_LENGTH);
-    applyNeighbourhoodGrayMaterials(hood);
+    applyNeighbourhoodBuildingMaterials(hood);
+    offsetNeighbourhoodSoRoadCentersOnRunAxis(hood);
     g.add(hood);
     console.info("[World] Neighbourhood GLB loaded:", loadedUrl);
   } catch (err) {
     console.error("[World] Neighbourhood GLB failed:", err);
   }
   if (countDrawableNeighbourhoodMeshes(g) === 0) {
-    console.warn("[World] No neighbourhood meshes — adding gray fallback strip.");
+    console.warn("[World] No neighbourhood meshes — adding fallback strip.");
     addNeighbourhoodFallbackStrip(g);
   }
   g.position.set(0, RUNWAY_SURFACE_Y, 0);
@@ -2824,6 +3141,8 @@ async function buildNeighbourhoodWorldInternal() {
     g.position.z = RUN_START_Z - NEIGHBOURHOOD_SPAWN_LEAD_Z - worldBox.min.z;
   }
   g.updateMatrixWorld(true);
+  const hoodChild = g.getObjectByName("neighbourhoodCity");
+  if (hoodChild) alignNeighbourhoodRoadTopToRunSurfaceY(g, hoodChild);
   g.visible = true;
   scene.add(g);
   neighbourhoodWorldGroup = g;
@@ -3221,10 +3540,16 @@ function syncPlayerMesh(dt) {
   }
   if (ceezRunAction && inActiveRun) {
     const suppressRunForJump = isJumpOverObstaclesPoseActive();
+    const kb = getControlMode() === "kb";
+    const kbRunPose = kb && (kbForwardHeld() || kbArrowLeftDown || kbArrowRightDown);
+    const showRun = suppressRunForJump ? false : !kb || kbRunPose;
     ceezRunAction.enabled = true;
-    ceezRunAction.setEffectiveWeight(suppressRunForJump ? 0 : 1);
-    if (!suppressRunForJump && !ceezRunAction.isRunning()) {
+    ceezRunAction.setEffectiveWeight(showRun ? 1 : 0);
+    if (showRun && !ceezRunAction.isRunning()) {
       ceezRunAction.reset().fadeIn(0.08).play();
+    }
+    if (showRun) {
+      ceezRunAction.timeScale = 1;
     }
   }
   if (rayMesh) {
@@ -3423,13 +3748,15 @@ function stepPlaying(dt) {
     const lat = (p.x - runOrigin.x) * R.x + (p.z - runOrigin.z) * R.z;
     const latTarget = LANES[laneIndex];
     const latErr = latTarget - lat;
-    const vR_desired = latErr * LANE_SMOOTH;
+    const kb = getControlMode() === "kb";
+    const forwardActive = kb ? kbForwardHeld() : true;
+    const vR_desired = kb && !forwardActive ? 0 : latErr * LANE_SMOOTH;
     const blocked = level1VictoryFreeze;
-    const vF_desired = blocked ? 0 : FORWARD_SPEED;
+    const vF_desired = blocked || !forwardActive ? 0 : FORWARD_SPEED;
     if (!blocked) {
       playerBody.velocity.x = F.x * vF_desired + R.x * vR_desired;
       playerBody.velocity.z = F.z * vF_desired + R.z * vR_desired;
-      runDistanceTraveledM += FORWARD_SPEED * dt;
+      if (forwardActive) runDistanceTraveledM += FORWARD_SPEED * dt;
     } else {
       playerBody.velocity.x = 0;
       playerBody.velocity.z = 0;
@@ -3474,6 +3801,8 @@ function animate() {
       syncPlayerFacingFromVelocity();
       syncVisibleRunwayPlane();
       updateCamera();
+    } else {
+      syncRunEnvironmentLights();
     }
     renderer.render(scene, camera);
   } catch (err) {
@@ -3493,10 +3822,8 @@ function bindUi() {
     },
     { passive: false }
   );
-  btnEnterLevel1?.addEventListener("click", () => tryEnterLevelFromPrelevel());
-  btnEnterLevel1?.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    tryEnterLevelFromPrelevel();
+  btnEnterLevel1?.addEventListener("click", () => {
+    void tryEnterLevelFromPrelevel();
   });
   playerNameInput?.addEventListener("input", () => {
     if (getPrelevelNameTrimmed()) setPrelevelMeta("");
@@ -3505,7 +3832,7 @@ function bindUi() {
   playerNameInput?.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
-    tryEnterLevelFromPrelevel();
+    void tryEnterLevelFromPrelevel();
   });
   btnPrelevelHighScore?.addEventListener("click", () => {
     updatePrelevelSummary();
@@ -3675,21 +4002,20 @@ function bindUi() {
           return;
         }
       }
-      if (
-        state === "playing" &&
-        !runPaused &&
-        !level1VictoryFreeze &&
-        !level1EndCinematicStarted &&
-        getControlMode() === "kb" &&
-        (e.code === "ArrowUp" || e.code === "KeyW")
-      ) {
-        e.preventDefault();
-        return;
-      }
       if (state !== "playing" || runPaused) return;
       if (level1VictoryFreeze || level1EndCinematicStarted) return;
       const kbKeys = getControlMode() === "kb";
       if (kbKeys) {
+        if (e.code === "ArrowUp") {
+          e.preventDefault();
+          if (!e.repeat) kbArrowUpHeld = true;
+          return;
+        }
+        if (e.code === "KeyW") {
+          e.preventDefault();
+          if (!e.repeat) kbKeyWHeld = true;
+          return;
+        }
         if (e.code === "KeyZ") {
           if (e.repeat) return;
           e.preventDefault();
@@ -3768,6 +4094,8 @@ function bindUi() {
       if (getControlMode() !== "kb") return;
       if (e.code === "ArrowLeft") onKbLeftArrowUp();
       if (e.code === "ArrowRight") onKbRightArrowUp();
+      if (e.code === "ArrowUp") kbArrowUpHeld = false;
+      if (e.code === "KeyW") kbKeyWHeld = false;
     },
     true
   );
@@ -3782,6 +4110,7 @@ async function bootstrap() {
   applyTouchLayout();
   initThree();
   initPhysics();
+  await tryLoadNeighbourhoodSurfaceTexturesOnce();
   void ensureNeighbourhoodWorldLoaded().catch((err) => {
     console.warn("[World] Background preload:", err?.message || err);
   });
