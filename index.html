@@ -17,7 +17,7 @@
     };
   </script>
   <style>
-    html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; background: #3d2848; }
+    html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; background: #000000; }
     /* Portrait 9:16 playfield — letterboxed on wider viewports */
     #game-letterbox {
       position: fixed;
@@ -26,7 +26,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      background: #3d2848;
+      background: #000000;
     }
     #game-9-16 {
       position: relative;
@@ -36,7 +36,7 @@
       height: min(100vh, calc(100vw * 16 / 9));
       max-width: 100vw;
       max-height: 100vh;
-      background: linear-gradient(180deg, #2a3a72 0%, #6b4a9e 38%, #ff5a6e 72%, #ff7a4a 100%);
+      background: #000000;
       box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
       container-type: size;
       container-name: sky-hustle;
@@ -434,7 +434,7 @@
     >
       <p id="game-pause-title" class="text-center text-xs font-semibold uppercase tracking-[0.2em] text-white/55">Paused</p>
       <p class="mt-1.5 text-center text-[10px] leading-snug text-white/50">
-        <span class="font-semibold text-white/60">Keyboard (KB)</span>: hold Z to run · hold ← / → or A / D to steer (longer = sharper turn) · Space = jump · ↓ or B = banana · N = seeds.
+        <span class="font-semibold text-white/60">Keyboard (KB)</span>: walks forward automatically · hold Z to sprint · hold ← / → or A / D to steer (longer = sharper turn) · Space = jump · ↓ or B = banana · N = seeds.
         <span class="block mt-1 text-white/45">1H / 2H: runs forward automatically · ◀ ▶ or A / D = lanes (double-tap or Shift = corner) · Space · ↓.</span>
       </p>
       <p class="mt-1 text-center text-sm text-white/75">Adjust quick options or resume your run.</p>

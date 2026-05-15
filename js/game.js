@@ -10,6 +10,10 @@ import * as CANNON from "cannon-es";
 const LANES = [-1.82, 0, 1.82];
 /** Forward run speed (m/s-ish) for touch / 1h / 2h — full tilt. */
 const FORWARD_SPEED = 11;
+/** Keyboard: always moves forward at this speed; hold Z for {@link FORWARD_SPEED} sprint. */
+const WALK_SPEED = 4.75;
+/** When no dedicated walk FBX: slow the run clip for KB stroll. */
+const WALK_RUN_ANIM_TIME_SCALE = 0.52;
 const LANE_SMOOTH = 14;
 const PLAYER_HALF = new CANNON.Vec3(0.28, 0.88, 0.24);
 /** Top Y of runway collider — must match ground tile `body.position.y` + box half Y in `buildGroundTiles` / `recycleGroundTiles`. */
@@ -18,13 +22,13 @@ const RUNWAY_SURFACE_Y = 0.14 + 0.14;
 const SPACE_JUMP_VY = 13.5;
 const SPACE_JUMP_GROUND_EPS = 0.14;
 const SPACE_JUMP_MAX_UPWARD_VY = 0.5;
-/** Yellow ribbon — runway stays solid through here; scripted gap follows. */
+/** Runway stays solid through this forward distance (m); scripted gap follows. No in-world finish marker. */
 const FINISH_RIBBON_Z = 500;
 /** Recycled ground tile center at this Z is the story gap (one TILE_Z wide). */
 const LEVEL1_GAP_TILE_CENTER_Z = 590;
 /** Grounded past this Z on the landing rooftop counts as finishing the level. */
 const LEVEL1_LAND_COMPLETE_MIN_Z = 680;
-/** In-air window after the ribbon — start end video + overlay while jumping the gap. */
+/** In-air window after {@link FINISH_RIBBON_Z} — start end video + overlay while jumping the gap. */
 const LEVEL1_END_VIDEO_AIR_MIN_Z = 505;
 const LEVEL1_END_VIDEO_AIR_MAX_Z = 675;
 /** Root-relative media layout: `ui/`, `audio/`, `environment/`, `characters/`, `animations/`, `assets/`. */
@@ -36,6 +40,23 @@ const DIR_ANIM = "./animations/";
 const DIR_ASSETS = "./assets/";
 const DIR_PLACEHOLDERS = `${DIR_ASSETS}placeholders/`;
 
+/**
+ * Neighbourhood colours — how to change them
+ * ---------------------------------------------------------------------------
+ * **All browns in the city GLB** are driven from this file (hard-refresh after edits).
+ *
+ * | What you want | Where to edit |
+ * |----------------|---------------|
+ * | Wall / façade brown shades, mortar | Constants `NEIGHBOURHOOD_BUILDING_*`, array `_BUILDING_BROWNS` in {@link paintNeighbourhoodBuildingVertexPattern} |
+ * | How strong the dark “mortar” lines are | `isMortar` thresholds + `NEIGHBOURHOOD_BUILDING_MORTAR` inside {@link paintNeighbourhoodBuildingVertexPattern} |
+ * | Streets / plazas in the imported city (name matches “road”, “sidewalk”, …) | `NEIGHBOURHOOD_CITY_GROUND_BROWN_VERTEX` + road branch in {@link applyNeighbourhoodBuildingMaterials} |
+ * | Which meshes count as “windows” (painted like façades — same brown pattern) | Regex `NEIGHBOURHOOD_WINDOW_NAME_RE` + {@link isNeighbourhoodWindowMesh} |
+ * | Trees | `NEIGHBOURHOOD_LEAF_*`, `NEIGHBOURHOOD_BARK_*` and the `paintNeighbourhoodTree*` helpers |
+ * | One place that applies everything | {@link applyNeighbourhoodBuildingMaterials} |
+ *
+ * The **playable runway deck** (`visibleRunwayPlane` / recycled tiles) is separate — still grey asphalt for contrast.
+ */
+
 const LEVEL1_END_VIDEO_SRC = `${DIR_ANIM}level1-end.mp4`;
 /** Set true to play the level-complete video again; false = stats overlay only (faster iteration). */
 const LEVEL1_END_VIDEO_ENABLED = false;
@@ -43,12 +64,9 @@ const LEVEL1_END_VIDEO_ENABLED = false;
 const LEVEL1_END_OVERLAY_MIN_MS_NO_VIDEO = 4000;
 /** Active world backdrop GLB (materials in {@link applyNeighbourhoodBuildingMaterials}); local first, then GitHub raw. */
 const NEIGHBOURHOOD_WORLD_GLB = "neighbourhood_city_modular_lowpoly.glb";
-const NEIGHBOURHOOD_WORLD_GLB_FALLBACK = "sports_car_racing_paris.glb";
 const NEIGHBOURHOOD_CITY_GLB_URLS = [
   `${DIR_ENV}${NEIGHBOURHOOD_WORLD_GLB}`,
-  `${DIR_ENV}${NEIGHBOURHOOD_WORLD_GLB_FALLBACK}`,
   `https://raw.githubusercontent.com/iflipbrands/SkyHustle/main/environment/${NEIGHBOURHOOD_WORLD_GLB}`,
-  `https://raw.githubusercontent.com/iflipbrands/SkyHustle/main/environment/${NEIGHBOURHOOD_WORLD_GLB_FALLBACK}`,
 ];
 /** Flat asphalt when {@link RUNWAY_ASPHALT_MAP} is missing. */
 const NEIGHBOURHOOD_ASPHALT_COLOR = 0x3a3e44;
@@ -56,19 +74,24 @@ const NEIGHBOURHOOD_ASPHALT_COLOR = 0x3a3e44;
 const NEIGHBOURHOOD_ASPHALT_TINT = 0x45494e;
 /** Vertex paint for roads / runway (matches asphalt). */
 const NEIGHBOURHOOD_ASPHALT_VERTEX = 0x404448;
-/** Building browns — vertex-painted on every face (fallback) and brick tint. */
-const NEIGHBOURHOOD_BUILDING_BROWN_A = 0xa86840;
-const NEIGHBOURHOOD_BUILDING_BROWN_B = 0x965838;
-/** Multiplies brick texture toward warm brown. */
-const NEIGHBOURHOOD_BRICK_TINT_A = 0xdeb080;
-const NEIGHBOURHOOD_BRICK_TINT_B = 0xcf9a68;
-/** Tree / planter greens. */
-const NEIGHBOURHOOD_FOLIAGE_VERTEX_A = 0x5a8f52;
-const NEIGHBOURHOOD_FOLIAGE_VERTEX_B = 0x3d6b38;
+/** Brown for city GLB ground meshes (roads, sidewalks, etc.) — see colour guide above. */
+const NEIGHBOURHOOD_CITY_GROUND_BROWN_VERTEX = 0x6e5a48;
+/** Realistic facade browns (vertex-painted mortar + brick variation). */
+const NEIGHBOURHOOD_BUILDING_BROWN_A = 0x946a52;
+const NEIGHBOURHOOD_BUILDING_BROWN_B = 0x846050;
+/** Mortar lines — keep lighter than brick so nothing reads black in shadow. */
+const NEIGHBOURHOOD_BUILDING_MORTAR = 0x786056;
+/** Tree canopy greens. */
+const NEIGHBOURHOOD_LEAF_A = 0x4a9348;
+const NEIGHBOURHOOD_LEAF_B = 0x3a7a3a;
+/** Tree trunk / branch bark. */
+const NEIGHBOURHOOD_BARK_A = 0x4a3228;
+const NEIGHBOURHOOD_BARK_B = 0x5c4033;
+/** Multiplies brick texture when used elsewhere (buildings use vertex color only). */
+const NEIGHBOURHOOD_BRICK_TINT_A = 0xd4a070;
+const NEIGHBOURHOOD_BRICK_TINT_B = 0xc49060;
 /** Street furniture / vehicles. */
 const NEIGHBOURHOOD_PROP_VERTEX = 0x6a6e76;
-/** Glazing. */
-const NEIGHBOURHOOD_WINDOW_VERTEX = 0x1a1a1e;
 /** Clear-color fallback (horizon) when the sky dome has not drawn yet. */
 const RUN_SCENE_BACKGROUND = 0xff7a4a;
 /** Sunset gradient stops (bottom → top). */
@@ -87,9 +110,14 @@ const NEIGHBOURHOOD_WINDOW_BLACK = 0x0a0a0c;
  * Applied after fitting the GLB into {@link NEIGHBOURHOOD_RUN_WIDTH} × {@link NEIGHBOURHOOD_RUN_LENGTH}.
  * Post-fit uniform scale on the backdrop GLB (linear size ∝ this value).
  */
-const NEIGHBOURHOOD_SCALE_BOOST = 15.0;
-/** One brick texture repeat every N world meters (triplanar UVs on all wall faces). */
-const NEIGHBOURHOOD_BRICK_METERS_PER_TILE = 2.6;
+/** Tuned for {@link NEIGHBOURHOOD_WORLD_GLB} modular city (Paris track used a lower boost). */
+const NEIGHBOURHOOD_SCALE_BOOST = 17.4;
+/**
+ * Stretcher-bond scale on facades (triplanar UVs): U = horizontal along wall, V = vertical.
+ * Smaller values = more bricks; U > V keeps each brick wider than tall (horizontal long).
+ */
+const NEIGHBOURHOOD_BRICK_METERS_U = 0.95;
+const NEIGHBOURHOOD_BRICK_METERS_V = 0.34;
 /** Minimum time the level-end overlay stays up (video + tint + copy), ms. */
 const LEVEL1_END_MIN_DURATION_MS = 12000;
 /** Player spawn +Z at level run start. */
@@ -178,6 +206,8 @@ const CEEZ_RUN_ACTION_FBX = `${CEEZ_OBJ_DIR}new/FastRun.fbx`;
 const CEEZ_THROW_ACTION_FBX = `${CEEZ_OBJ_DIR}new/RunAndThrow.fbx`;
 /** Optional one-shot on Space — same rig as split / Meshy + FastRun. */
 const CEEZ_JUMP_OVER_OBSTACLES_FBX = `${DIR_ANIM}JumpOverObstacles.fbx`;
+/** Walk cycle (extensionless FBX) — `animations/Walking`; same rig as FastRun. */
+const CEEZ_WALKING_FBX = `${DIR_ANIM}Walking`;
 /** Skinned mesh only (Meshy materials preserved). */
 const CEEZ_MESHY_CHARACTER_FBX = `${DIR_CHAR}Ceez_Meshy.fbx`;
 /** Sole locomotion source for {@link CEEZ_MESHY_CHARACTER_FBX} (no embedded / merged pack clips). */
@@ -333,13 +363,13 @@ let ceezAnimMixer = null;
 /** @type {THREE.AnimationAction | null} */
 let ceezRunAction = null;
 /** @type {THREE.AnimationAction | null} */
+let ceezWalkAction = null;
+/** @type {THREE.AnimationAction | null} */
 let ceezThrowAction = null;
 /** @type {THREE.AnimationAction | null} */
 let ceezJumpOverObstaclesAction = null;
-/** @type {THREE.Group | null} */
-let finishLineVisual = null;
 let runStartAtMs = 0;
-/** Forward distance accumulated this run (m) — ribbon + HUD use this so 90° turns do not stall progress. */
+/** Forward distance accumulated this run (m) — HUD + gap logic use this so 90° turns do not stall progress. */
 let runDistanceTraveledM = 0;
 /** Set when level-1 victory sequence starts (for overlay time). */
 let level1FinishedAtMs = 0;
@@ -405,7 +435,7 @@ let kbArrowLeftDown = false;
 let kbArrowRightDown = false;
 let kbKeyADown = false;
 let kbKeyDDown = false;
-/** KB: Z held = run forward (no auto-run). */
+/** Hold Z for sprint speed + full run cycle; 1H/2H on phones still auto-sprint. */
 let kbKeyZHeld = false;
 let kbSteerLeftHoldSec = 0;
 let kbSteerRightHoldSec = 0;
@@ -579,6 +609,10 @@ function normalizeCeezMesh(root) {
 }
 
 function disposeCeezAnimRuntime() {
+  if (ceezWalkAction) {
+    ceezWalkAction.stop();
+    ceezWalkAction = null;
+  }
   if (ceezRunAction) {
     ceezRunAction.stop();
     ceezRunAction = null;
@@ -749,6 +783,88 @@ async function tryBindJumpOverObstaclesAction(mixer, runAction) {
 }
 
 /**
+ * Blend walk vs run on the Ceez mixer (also used after jump / throw one-shots finish).
+ * When {@link ceezWalkAction} is null, falls back to run-only + {@link WALK_RUN_ANIM_TIME_SCALE}.
+ */
+function syncCeezWalkRunLocomotionWeights() {
+  if (!ceezRunAction) return;
+  const suppressRunForJump = isJumpOverObstaclesPoseActive();
+  const locomotion = suppressRunForJump ? false : isForwardLocomotionActive();
+  const sprint = suppressRunForJump ? false : isRunSprintActive();
+
+  if (!ceezWalkAction) {
+    const playLoco = locomotion || sprint;
+    ceezRunAction.enabled = true;
+    ceezRunAction.setEffectiveWeight(playLoco ? 1 : 0);
+    if (playLoco && !ceezRunAction.isRunning()) {
+      ceezRunAction.reset().fadeIn(0.08).play();
+    }
+    if (playLoco) {
+      ceezRunAction.timeScale = sprint ? 1 : WALK_RUN_ANIM_TIME_SCALE;
+    }
+    return;
+  }
+
+  ceezRunAction.enabled = true;
+  ceezWalkAction.enabled = true;
+  if (!locomotion) {
+    ceezRunAction.setEffectiveWeight(0);
+    ceezWalkAction.setEffectiveWeight(0);
+    return;
+  }
+  if (sprint) {
+    ceezWalkAction.setEffectiveWeight(0);
+    ceezRunAction.setEffectiveWeight(1);
+    if (!ceezRunAction.isRunning()) ceezRunAction.reset().fadeIn(0.08).play();
+    ceezRunAction.timeScale = 1;
+  } else {
+    ceezRunAction.setEffectiveWeight(0);
+    ceezWalkAction.setEffectiveWeight(1);
+    if (!ceezWalkAction.isRunning()) ceezWalkAction.reset().fadeIn(0.08).play();
+    ceezWalkAction.timeScale = 1;
+  }
+}
+
+/**
+ * Load {@link CEEZ_WALKING_FBX} onto the same mixer as FastRun (Mixamo-style tracks on same rig).
+ * @returns {Promise<THREE.AnimationAction | null>}
+ */
+async function tryBindWalkingLocomotion(mixer) {
+  if (!mixer) return null;
+  try {
+    const src = await loadFbx(CEEZ_WALKING_FBX);
+    const clips = collectAnimationClips(src, src.animations || []);
+    const raw = pickWalkingClip(clips);
+    if (!raw) {
+      console.warn(`[Ceez Walk] No clip in ${CEEZ_WALKING_FBX}`);
+      return null;
+    }
+    const clip = animationClipWithoutRootPositionTracks(raw);
+    const walkAction = mixer.clipAction(clip);
+    walkAction.setLoop(THREE.LoopRepeat, Infinity);
+    walkAction.clampWhenFinished = false;
+    walkAction.enabled = true;
+    walkAction.setEffectiveWeight(0);
+    walkAction.play();
+    console.info(`[Ceez Walk] bound "${raw.name || "(unnamed)"}" from ${CEEZ_WALKING_FBX}`);
+    return walkAction;
+  } catch (err) {
+    console.warn("[Ceez Walk] Walking FBX failed (missing path or rig mismatch).", err);
+    return null;
+  }
+}
+
+function pickWalkingClip(clips) {
+  if (!clips?.length) return null;
+  const ok = (c) => !clipNameExcludedFromLocomotion(c.name);
+  return (
+    clips.find((c) => ok(c) && /walk/i.test(String(c.name || ""))) ||
+    clips.find((c) => ok(c)) ||
+    clips[0]
+  );
+}
+
+/**
  * One-shot clip: disabled until played; on finish, restore looping run.
  * @param {THREE.AnimationMixer} mixer
  * @param {THREE.AnimationAction} runAction
@@ -764,9 +880,7 @@ function bindOneShotReturnsToRun(mixer, runAction, oneShot) {
     oneShot.stop();
     oneShot.enabled = false;
     oneShot.setEffectiveWeight(0);
-    runAction.enabled = true;
-    runAction.setEffectiveWeight(1);
-    if (!runAction.isRunning()) runAction.play();
+    syncCeezWalkRunLocomotionWeights();
   });
 }
 
@@ -1412,8 +1526,24 @@ const CONTROL_MODE_KEY = "sky_hustle_touch_layout";
 
 function getControlMode() {
   const saved = localStorage.getItem(CONTROL_MODE_KEY);
-  if (saved === "2h" || saved === "kb") return saved;
-  return "1h";
+  if (saved === "1h" || saved === "2h" || saved === "kb") return saved;
+  return "kb";
+}
+
+/** True while the character should advance along the track (KB: walk without keys; touch: as before). */
+function isForwardLocomotionActive() {
+  if (level1VictoryFreeze || level1EndCinematicStarted) return false;
+  const mode = getControlMode();
+  if ((mode === "1h" || mode === "2h") && "ontouchstart" in window) return true;
+  return mode === "kb";
+}
+
+/** Sprint: full {@link FORWARD_SPEED} + run anim at full speed. Touch 1H/2H always sprint on phones. */
+function isRunSprintActive() {
+  if (level1VictoryFreeze || level1EndCinematicStarted) return false;
+  const mode = getControlMode();
+  if ((mode === "1h" || mode === "2h") && "ontouchstart" in window) return true;
+  return kbKeyZHeld;
 }
 
 function setControlMode(mode) {
@@ -2025,6 +2155,9 @@ function playJumpOverObstaclesAnim() {
     ceezRunAction.setEffectiveWeight(0);
     if (!ceezRunAction.isRunning()) ceezRunAction.play();
   }
+  if (ceezWalkAction) {
+    ceezWalkAction.setEffectiveWeight(0);
+  }
 
   ceezJumpOverObstaclesAction.reset();
   ceezJumpOverObstaclesAction.enabled = true;
@@ -2256,47 +2389,6 @@ function tryCompleteLevel1AfterLanding() {
   beginLevel1VictoryFreezeAfterLand();
 }
 
-function ensureFinishLineVisual() {
-  if (finishLineVisual) return;
-  const group = new THREE.Group();
-  const laneSpan = Math.abs(LANES[LANES.length - 1] - LANES[0]) + 1.6;
-  const poleY = RUNWAY_SURFACE_Y + 1.05;
-
-  const poleGeo = new THREE.CylinderGeometry(0.06, 0.06, 2.1, 12);
-  const poleMat = new THREE.MeshStandardMaterial({ color: 0xe6e6e6, roughness: 0.65, metalness: 0.2 });
-  const leftPole = new THREE.Mesh(poleGeo, poleMat);
-  const rightPole = new THREE.Mesh(poleGeo, poleMat);
-  leftPole.castShadow = true;
-  rightPole.castShadow = true;
-  leftPole.position.set(LANES[0] - 0.8, poleY, 0);
-  rightPole.position.set(LANES[LANES.length - 1] + 0.8, poleY, 0);
-
-  const ribbonGeo = new THREE.PlaneGeometry(laneSpan, 0.45);
-  const ribbonMat = new THREE.MeshStandardMaterial({
-    color: 0xf0c14d,
-    emissive: 0x5a3f00,
-    emissiveIntensity: 0.18,
-    side: THREE.DoubleSide,
-    roughness: 0.45,
-    metalness: 0.05,
-  });
-  const ribbon = new THREE.Mesh(ribbonGeo, ribbonMat);
-  ribbon.castShadow = true;
-  ribbon.position.set(0, RUNWAY_SURFACE_Y + 1.55, 0);
-
-  group.add(leftPole, rightPole, ribbon);
-  finishLineVisual = group;
-  scene.add(group);
-  syncFinishLineVisualWorldPose();
-}
-
-function syncFinishLineVisualWorldPose() {
-  if (!finishLineVisual) return;
-  const d = FINISH_RIBBON_Z;
-  finishLineVisual.position.set(runOrigin.x + _runForward.x * d, 0, runOrigin.z + _runForward.z * d);
-  finishLineVisual.rotation.y = worldRunYaw;
-}
-
 function disposeProjectileResources(pr) {
   if (pr.kind === "seed") {
     pr.mesh.geometry?.dispose();
@@ -2424,10 +2516,6 @@ function wrapAnglePi(ang) {
   return ((((ang + Math.PI) % twoPi) + twoPi) % twoPi) - Math.PI;
 }
 
-function kbForwardHeld() {
-  return kbKeyZHeld;
-}
-
 function kbSteerLeftHeld() {
   return kbArrowLeftDown || kbKeyADown;
 }
@@ -2474,14 +2562,14 @@ function onKbRightArrowUp() {
 }
 
 /**
- * Keyboard mode: hold Z to run; hold ←/→ (or A/D) to steer — longer hold turns faster.
+ * Keyboard mode: walk forward automatically; hold ←/→ (or A/D) to steer; hold Z to sprint.
  */
 function applyKbArrowSteering(dt) {
   if (getControlMode() !== "kb" || state !== "playing" || runPaused) return;
   if (level1VictoryFreeze || level1EndCinematicStarted) return;
   if (!playerBody) return;
 
-  const canSteer = kbForwardHeld();
+  const canSteer = isForwardLocomotionActive();
   const left = canSteer && kbSteerLeftHeld();
   const right = canSteer && kbSteerRightHeld();
   const leftRamp = kbSteerYawRate(dt, kbSteerLeftHoldSec, left && !right);
@@ -2613,6 +2701,7 @@ async function buildPlayer() {
       ceezJumpOverObstaclesAction = null;
       if (ceezAnimMixer && ceezRunAction) {
         ceezJumpOverObstaclesAction = await tryBindJumpOverObstaclesAction(ceezAnimMixer, ceezRunAction);
+        ceezWalkAction = await tryBindWalkingLocomotion(ceezAnimMixer);
       }
     } else {
       try {
@@ -2789,6 +2878,118 @@ function paintMeshVertexColors(geometry, colorHex) {
   geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 }
 
+const _bldPatA = new THREE.Color();
+const _bldPatB = new THREE.Color();
+const _bldPatC = new THREE.Color();
+const _bldPatOut = new THREE.Color();
+const _BUILDING_BROWNS = [
+  NEIGHBOURHOOD_BUILDING_BROWN_A,
+  NEIGHBOURHOOD_BUILDING_BROWN_B,
+  0x9a7460,
+  0x806048,
+  0xa88872,
+];
+
+function neighbourhoodMeshSeed(meshKey = "") {
+  let h = 0;
+  for (let i = 0; i < meshKey.length; i++) h = (h + meshKey.charCodeAt(i) * 17) | 0;
+  return Math.abs(h);
+}
+
+/**
+ * Realistic brown facade — soft mortar lines, varied brick tones, height + noise (vertex colors).
+ * @param {THREE.BufferGeometry} geometry
+ * @param {string} [meshKey]
+ */
+function paintNeighbourhoodBuildingVertexPattern(geometry, meshKey = "") {
+  const pos = geometry.attributes.position;
+  if (!pos) return;
+  _bldPatA.setHex(NEIGHBOURHOOD_BUILDING_MORTAR);
+  const course = 1 / Math.max(NEIGHBOURHOOD_BRICK_METERS_V, 0.08);
+  const stretch = 1 / Math.max(NEIGHBOURHOOD_BRICK_METERS_U, 0.08);
+  const seed = neighbourhoodMeshSeed(meshKey);
+  const phaseX = (seed % 997) * 0.0021;
+  const phaseZ = ((seed >> 5) % 991) * 0.0023;
+  if (!geometry.boundingBox) geometry.computeBoundingBox();
+  const yLo = geometry.boundingBox?.min.y ?? 0;
+  const yHi = geometry.boundingBox?.max.y ?? 12;
+  const ySpan = Math.max(yHi - yLo, 1);
+  const count = pos.count;
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const u = (x + phaseX) * stretch;
+    const v = y * course;
+    const row = Math.floor(v);
+    const col = Math.floor(u + Math.floor((z + phaseZ) * stretch * 0.35));
+    const fu = u - Math.floor(u);
+    const fv = v - Math.floor(v);
+    const isMortar = fv < 0.038 || fu < 0.032;
+    if (isMortar) {
+      _bldPatOut.copy(_bldPatA);
+    } else {
+      const pick = _BUILDING_BROWNS[(row * 5 + col * 11 + seed) % _BUILDING_BROWNS.length];
+      _bldPatOut.setHex(pick);
+      const heightT = (y - yLo) / ySpan;
+      _bldPatOut.offsetHSL(0, 0, heightT * 0.05 - 0.02);
+      _bldPatOut.offsetHSL(0, -0.01, Math.sin(x * 19.3 + y * 11.7 + z * 13.1) * 0.028);
+    }
+    _bldPatOut.toArray(colors, i * 3);
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+}
+
+const _leafA = new THREE.Color();
+const _leafB = new THREE.Color();
+const _leafOut = new THREE.Color();
+
+/** Green canopy with natural variation (vertex colors). */
+function paintNeighbourhoodTreeFoliageVertexPattern(geometry, meshKey = "") {
+  const pos = geometry.attributes.position;
+  if (!pos) return;
+  _leafA.setHex(NEIGHBOURHOOD_LEAF_A);
+  _leafB.setHex(NEIGHBOURHOOD_LEAF_B);
+  const seed = neighbourhoodMeshSeed(meshKey);
+  const count = pos.count;
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    _leafOut.copy((Math.floor(x * 3.1 + z * 2.7 + seed) % 2) === 0 ? _leafA : _leafB);
+    _leafOut.offsetHSL(0.02, 0.05, Math.sin(x * 22.1 + y * 9.3 + z * 17.5) * 0.06);
+    _leafOut.toArray(colors, i * 3);
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+}
+
+const _barkA = new THREE.Color();
+const _barkB = new THREE.Color();
+const _barkOut = new THREE.Color();
+
+/** Brown trunk / branch bark (vertex colors). */
+function paintNeighbourhoodTreeBarkVertexPattern(geometry, meshKey = "") {
+  const pos = geometry.attributes.position;
+  if (!pos) return;
+  _barkA.setHex(NEIGHBOURHOOD_BARK_A);
+  _barkB.setHex(NEIGHBOURHOOD_BARK_B);
+  const seed = neighbourhoodMeshSeed(meshKey);
+  const count = pos.count;
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const strip = Math.floor(y * 4.2 + seed * 0.001) % 2;
+    _barkOut.copy(strip === 0 ? _barkA : _barkB);
+    _barkOut.offsetHSL(0, 0, Math.sin(x * 14.3 + z * 11.9) * 0.05);
+    _barkOut.toArray(colors, i * 3);
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+}
+
 const _brickUvPos = new THREE.Vector3();
 const _brickUvNormal = new THREE.Vector3();
 
@@ -2804,7 +3005,8 @@ function assignNeighbourhoodBoxUvs(geometry) {
     geometry.computeVertexNormals();
     normal = geometry.attributes.normal;
   }
-  const tile = 1 / Math.max(NEIGHBOURHOOD_BRICK_METERS_PER_TILE, 0.2);
+  const tileU = 1 / Math.max(NEIGHBOURHOOD_BRICK_METERS_U, 0.08);
+  const tileV = 1 / Math.max(NEIGHBOURHOOD_BRICK_METERS_V, 0.08);
   const uv = new Float32Array(pos.count * 2);
   for (let i = 0; i < pos.count; i++) {
     _brickUvPos.fromBufferAttribute(pos, i);
@@ -2815,14 +3017,14 @@ function assignNeighbourhoodBoxUvs(geometry) {
     let u;
     let v;
     if (ax >= ay && ax >= az) {
-      u = _brickUvPos.z * tile;
-      v = _brickUvPos.y * tile;
+      u = _brickUvPos.z * tileU;
+      v = _brickUvPos.y * tileV;
     } else if (ay >= ax && ay >= az) {
-      u = _brickUvPos.x * tile;
-      v = _brickUvPos.z * tile;
+      u = _brickUvPos.x * tileU;
+      v = _brickUvPos.z * tileV;
     } else {
-      u = _brickUvPos.x * tile;
-      v = _brickUvPos.y * tile;
+      u = _brickUvPos.x * tileU;
+      v = _brickUvPos.y * tileV;
     }
     uv[i * 2] = u;
     uv[i * 2 + 1] = v;
@@ -2881,14 +3083,44 @@ function makeNeighbourhoodBrickMaterial(tint = NEIGHBOURHOOD_BRICK_TINT_A) {
   });
 }
 
-function makeNeighbourhoodBrickFallbackMaterial() {
+/** Brown facade — uses geometry `color` from {@link paintNeighbourhoodBuildingVertexPattern}. */
+function makeNeighbourhoodBuildingVertexMaterial() {
   return new THREE.MeshStandardMaterial({
     vertexColors: true,
     color: 0xffffff,
-    roughness: 0.9,
-    metalness: 0.03,
-    emissive: new THREE.Color(0x4a3428),
-    emissiveIntensity: 0.16,
+    roughness: 0.92,
+    metalness: 0.02,
+    emissive: new THREE.Color(0x3d2e24),
+    emissiveIntensity: 0.04,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    depthTest: true,
+  });
+}
+
+function makeNeighbourhoodTreeFoliageMaterial() {
+  return new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    color: 0xffffff,
+    roughness: 0.88,
+    metalness: 0.02,
+    emissive: new THREE.Color(0x1a3018),
+    emissiveIntensity: 0.05,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    depthTest: true,
+  });
+}
+
+/** Tree bark — vertex color from {@link paintNeighbourhoodTreeBarkVertexPattern}. */
+function makeNeighbourhoodTreeBarkMaterial() {
+  return new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    color: 0xffffff,
+    roughness: 0.95,
+    metalness: 0.01,
+    emissive: new THREE.Color(0x000000),
+    emissiveIntensity: 0,
     side: THREE.DoubleSide,
     depthWrite: true,
     depthTest: true,
@@ -2985,15 +3217,22 @@ function fitNeighbourhoodToAlley(root, targetWidth, targetLength) {
 const NEIGHBOURHOOD_WINDOW_NAME_RE =
   /window|glass|glaz|pane|curtain|storefront|fenestr|skylight|vitro|disp(win|lay)|_win|win_|facade_glass/i;
 
-/** Traffic / vehicles / street hardware / trees — keep off brick palette. */
+/** Traffic / vehicles / street hardware — keep off brick palette (not root `Sketchfab_model`). */
 const NEIGHBOURHOOD_PROP_NAME_RE =
-  /(^|[^A-Za-z0-9])(SM_|_gltfNode_)|traffic|barricade|barrier|cone|delineator|bmw|streetlight|solar|sketchfab_model\.0\d\d|split_ac|acer_|_lod2_|pot_\d|sketchfab_model/i;
+  /(^|[^A-Za-z0-9])(SM_|_gltfNode_)|traffic|barricade|barrier|cone|delineator|bmw|streetlight|solar|sketchfab_model\.0\d\d|split_ac|acer_|_lod2_|pot_\d/i;
 
-/** Planters / street trees in the modular city kit. */
-const NEIGHBOURHOOD_FOLIAGE_NAME_RE = /acer_|foliage|tree|bark|cluster_mat|pot_\d/i;
+/** Tree canopy (Acer cluster mats, etc.) — not bark or street hardware. */
+const NEIGHBOURHOOD_FOLIAGE_NAME_RE = /acer_|foliage|cluster_mat|pot_\d/i;
+/** Trunk / branch bark on street trees. */
+const NEIGHBOURHOOD_TREE_BARK_NAME_RE = /\bbark\b|bark_mat/i;
 
 /** Facade masonry from modular `Wall_*` nodes. */
 const NEIGHBOURHOOD_WALL_NAME_RE = /\bwall\b|wall_\d|wall\./i;
+/** Street hardware / cars / junk — hidden (huge grey meshes in the modular GLB). */
+const NEIGHBOURHOOD_HIDDEN_NAME_RE =
+  /streetlight|largelight|lightcolors|solarpanel|solar|barricade|traffic|bmw|sketchfab_model\.\d|sm_light|sm_barricade|sm_delineator|delineator|cone|barrier|verticade|split_ac|pot_\d|acer_|_lod2_|_gltfnode_/i;
+/** Hide non-building meshes larger than this (world m) after city scale. */
+const NEIGHBOURHOOD_HIDE_MESH_OVER_M = 38;
 
 function collectNeighbourhoodMeshMaterialNames(mesh) {
   const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
@@ -3030,18 +3269,53 @@ function isNeighbourhoodWindowMesh(mesh) {
 
 function isNeighbourhoodStreetPropMesh(mesh) {
   const blob = neighbourhoodNameBlob(mesh);
-  if (NEIGHBOURHOOD_FOLIAGE_NAME_RE.test(blob)) return false;
+  if (isNeighbourhoodTreeBarkMesh(mesh) || isNeighbourhoodTreeFoliageMesh(mesh)) return false;
   if (NEIGHBOURHOOD_PROP_NAME_RE.test(blob)) return true;
   if (/streetlight/i.test(collectNeighbourhoodMeshMaterialNames(mesh))) return true;
   return false;
 }
 
-function isNeighbourhoodFoliageMesh(mesh) {
+function isNeighbourhoodTreeBarkMesh(mesh) {
+  return NEIGHBOURHOOD_TREE_BARK_NAME_RE.test(neighbourhoodNameBlob(mesh));
+}
+
+function isNeighbourhoodTreeFoliageMesh(mesh) {
+  if (isNeighbourhoodTreeBarkMesh(mesh)) return false;
   return NEIGHBOURHOOD_FOLIAGE_NAME_RE.test(neighbourhoodNameBlob(mesh));
+}
+
+/** @deprecated Use {@link isNeighbourhoodTreeFoliageMesh}. */
+function isNeighbourhoodFoliageMesh(mesh) {
+  return isNeighbourhoodTreeFoliageMesh(mesh);
 }
 
 function isNeighbourhoodWallMesh(mesh) {
   return NEIGHBOURHOOD_WALL_NAME_RE.test(neighbourhoodNameBlob(mesh));
+}
+
+function isNeighbourhoodHiddenMesh(mesh) {
+  return NEIGHBOURHOOD_HIDDEN_NAME_RE.test(neighbourhoodNameBlob(mesh));
+}
+
+function isNeighbourhoodOversizedMesh(mesh) {
+  if (!mesh.isMesh && !mesh.isInstancedMesh) return false;
+  const box = new THREE.Box3().setFromObject(mesh);
+  if (box.isEmpty()) return false;
+  const size = box.getSize(new THREE.Vector3());
+  return Math.max(size.x, size.y, size.z) > NEIGHBOURHOOD_HIDE_MESH_OVER_M;
+}
+
+/** Drop street-light shells and other oversized grey props from the modular city kit. */
+function shouldHideNeighbourhoodMesh(mesh) {
+  if (isNeighbourhoodHiddenMesh(mesh)) return true;
+  if (isNeighbourhoodRoadLikeMesh(mesh)) return false;
+  if (isNeighbourhoodWindowMesh(mesh)) return false;
+  if (isNeighbourhoodWallMesh(mesh)) return false;
+  if (isNeighbourhoodTreeBarkMesh(mesh)) return false;
+  if (isNeighbourhoodTreeFoliageMesh(mesh)) return false;
+  if (isNeighbourhoodBuildingMesh(mesh)) return false;
+  if (isNeighbourhoodOversizedMesh(mesh)) return true;
+  return false;
 }
 
 /** Road / track meshes: used to center the scene on the run axis and match run surface height. */
@@ -3107,66 +3381,55 @@ function neighbourhoodBrickBucket(meshId) {
 }
 
 /**
- * Vertex-painted neighbourhood: brown buildings (brick UV on all faces), dark grey roads, green trees.
+ * Vertex-painted neighbourhood: brown building facades, dark grey roads, green trees.
  */
 function isNeighbourhoodBuildingMesh(mesh) {
   if (isNeighbourhoodRoadLikeMesh(mesh)) return false;
   if (isNeighbourhoodWindowMesh(mesh)) return false;
-  if (isNeighbourhoodFoliageMesh(mesh)) return false;
+  if (isNeighbourhoodTreeBarkMesh(mesh)) return false;
+  if (isNeighbourhoodTreeFoliageMesh(mesh)) return false;
   if (isNeighbourhoodStreetPropMesh(mesh)) return false;
+  if (isNeighbourhoodHiddenMesh(mesh)) return false;
+  if (isNeighbourhoodWallMesh(mesh)) return true;
   return true;
 }
 
 function applyNeighbourhoodBuildingMaterials(root) {
-  const matBrickA = makeNeighbourhoodBrickMaterial(NEIGHBOURHOOD_BRICK_TINT_A);
-  const matBrickB = makeNeighbourhoodBrickMaterial(NEIGHBOURHOOD_BRICK_TINT_B);
-  const matBrickBrownA = makeNeighbourhoodBrickFallbackMaterial();
-  const matBrickBrownB = makeNeighbourhoodBrickFallbackMaterial();
-  const matRoad = makeNeighbourhoodAsphaltMaterial(10, 10);
-  const matFoliage = makeNeighbourhoodVertexMaterial(0.9, 0.02);
+  const matBuilding = makeNeighbourhoodBuildingVertexMaterial();
+  const matCityGround = makeNeighbourhoodVertexMaterial(0.93, 0.02);
+  const matTreeLeaf = makeNeighbourhoodTreeFoliageMaterial();
+  const matTreeBark = makeNeighbourhoodTreeBarkMaterial();
   const matProp = makeNeighbourhoodVertexMaterial(0.88, 0.1);
-  const matWindow = makeNeighbourhoodVertexMaterial(0.4, 0.15);
-  const useBrickMap = Boolean(neighbourhoodBrickTex);
   root.updateMatrixWorld(true);
   root.traverse((obj) => {
     if (!obj.isMesh && !obj.isInstancedMesh) return;
+    if (shouldHideNeighbourhoodMesh(obj)) {
+      obj.visible = false;
+      return;
+    }
     const geo = obj.geometry;
     if (!geo) return;
     if (!geo.attributes.normal) geo.computeVertexNormals();
 
     let mat;
     if (isNeighbourhoodRoadLikeMesh(obj)) {
-      paintMeshVertexColors(geo, NEIGHBOURHOOD_ASPHALT_VERTEX);
-      mat = matRoad;
-    } else if (isNeighbourhoodWindowMesh(obj)) {
-      paintMeshVertexColors(geo, NEIGHBOURHOOD_WINDOW_VERTEX);
-      mat = matWindow;
-    } else if (isNeighbourhoodFoliageMesh(obj)) {
-      paintMeshVertexColors(
-        geo,
-        neighbourhoodBrickBucket(obj.uuid) === 0
-          ? NEIGHBOURHOOD_FOLIAGE_VERTEX_A
-          : NEIGHBOURHOOD_FOLIAGE_VERTEX_B
-      );
-      mat = matFoliage;
+      paintMeshVertexColors(geo, NEIGHBOURHOOD_CITY_GROUND_BROWN_VERTEX);
+      mat = matCityGround;
+    } else if (isNeighbourhoodTreeBarkMesh(obj)) {
+      paintNeighbourhoodTreeBarkVertexPattern(geo, obj.uuid);
+      mat = matTreeBark;
+    } else if (isNeighbourhoodTreeFoliageMesh(obj)) {
+      paintNeighbourhoodTreeFoliageVertexPattern(geo, obj.uuid);
+      mat = matTreeLeaf;
     } else if (isNeighbourhoodStreetPropMesh(obj)) {
       paintMeshVertexColors(geo, NEIGHBOURHOOD_PROP_VERTEX);
       mat = matProp;
-    } else if (isNeighbourhoodBuildingMesh(obj)) {
-      if (useBrickMap) {
-        if (geo.attributes.color) geo.deleteAttribute("color");
-        assignNeighbourhoodBoxUvs(geo);
-        mat = neighbourhoodBrickBucket(obj.uuid) === 0 ? matBrickA : matBrickB;
-      } else {
-        const brown =
-          neighbourhoodBrickBucket(obj.uuid) === 0
-            ? NEIGHBOURHOOD_BUILDING_BROWN_A
-            : NEIGHBOURHOOD_BUILDING_BROWN_B;
-        paintMeshVertexColors(geo, brown);
-        mat = neighbourhoodBrickBucket(obj.uuid) === 0 ? matBrickBrownA : matBrickBrownB;
-      }
+    } else if (isNeighbourhoodBuildingMesh(obj) || isNeighbourhoodWindowMesh(obj)) {
+      paintNeighbourhoodBuildingVertexPattern(geo, obj.uuid);
+      mat = matBuilding;
     } else {
-      mat = matProp;
+      paintNeighbourhoodBuildingVertexPattern(geo, obj.uuid);
+      mat = matBuilding;
     }
     obj.material = mat;
     obj.castShadow = true;
@@ -3178,7 +3441,7 @@ function applyNeighbourhoodBuildingMaterials(root) {
 /** If the GLB has no meshes (load fail / empty), add a simple strip so the run is never “void purple”. */
 function addNeighbourhoodFallbackStrip(parent) {
   const matFloor = makeNeighbourhoodAsphaltMaterial(24, 90);
-  const matWall = makeNeighbourhoodBrickMaterial(NEIGHBOURHOOD_BRICK_TINT_A);
+  const matWall = makeNeighbourhoodBuildingVertexMaterial();
   const len = NEIGHBOURHOOD_RUN_LENGTH;
   const halfW = Math.max(18, NEIGHBOURHOOD_RUN_WIDTH * 0.45);
   const floorGeo = new THREE.PlaneGeometry(halfW * 2 + 20, len);
@@ -3191,17 +3454,17 @@ function addNeighbourhoodFallbackStrip(parent) {
   const wallH = 32;
   const wallD = len * 0.95;
   const wallGeoL = new THREE.BoxGeometry(5, wallH, wallD);
+  paintNeighbourhoodBuildingVertexPattern(wallGeoL, "fallbackL");
   const left = new THREE.Mesh(wallGeoL, matWall);
   left.position.set(-(halfW + 3.5), wallH * 0.5, len * 0.5);
   left.name = "neighbourhoodFallbackWallL";
   parent.add(left);
-  assignNeighbourhoodBoxUvs(wallGeoL);
   const wallGeoR = new THREE.BoxGeometry(5, wallH, wallD);
+  paintNeighbourhoodBuildingVertexPattern(wallGeoR, "fallbackR");
   const right = new THREE.Mesh(wallGeoR, matWall);
   right.position.set(halfW + 3.5, wallH * 0.5, len * 0.5);
   right.name = "neighbourhoodFallbackWallR";
   parent.add(right);
-  assignNeighbourhoodBoxUvs(wallGeoR);
 }
 
 function countDrawableNeighbourhoodMeshes(root) {
@@ -3241,6 +3504,12 @@ async function buildNeighbourhoodWorldInternal() {
     });
     fitNeighbourhoodToAlley(hood, NEIGHBOURHOOD_RUN_WIDTH, NEIGHBOURHOOD_RUN_LENGTH);
     offsetNeighbourhoodSoRoadCentersOnRunAxis(hood);
+    hood.updateMatrixWorld(true);
+    hood.traverse((ch) => {
+      if ((ch.isMesh || ch.isInstancedMesh) && shouldHideNeighbourhoodMesh(ch)) {
+        ch.visible = false;
+      }
+    });
     g.add(hood);
     console.info("[World] Neighbourhood GLB loaded:", loadedUrl);
   } catch (err) {
@@ -3658,19 +3927,7 @@ function syncPlayerMesh(dt) {
     ceezAnimMixer.update(dt);
   }
   if (ceezRunAction && inActiveRun) {
-    const suppressRunForJump = isJumpOverObstaclesPoseActive();
-    const vf =
-      playerBody.velocity.x * _runForward.x + playerBody.velocity.z * _runForward.z;
-    const movingForward = vf > 0.4;
-    const showRun = suppressRunForJump ? false : movingForward;
-    ceezRunAction.enabled = true;
-    ceezRunAction.setEffectiveWeight(showRun ? 1 : 0);
-    if (showRun && !ceezRunAction.isRunning()) {
-      ceezRunAction.reset().fadeIn(0.08).play();
-    }
-    if (showRun) {
-      ceezRunAction.timeScale = 1;
-    }
+    syncCeezWalkRunLocomotionWeights();
   }
   if (rayMesh) {
     rayMesh.position.x = RAY_BASE_X;
@@ -3733,11 +3990,6 @@ function resetRun() {
     rayMesh.rotation.x = 0;
     rayMesh.rotation.z = 0;
   }
-  ensureFinishLineVisual();
-  if (finishLineVisual) {
-    finishLineVisual.visible = true;
-    syncFinishLineVisualWorldPose();
-  }
 }
 
 async function startGame() {
@@ -3781,6 +4033,7 @@ function returnToMainMenuFromRun(bestCandidateScore) {
   stopGameMusic();
   hideGameOverOverlay();
   ceezRunAction?.fadeOut(0.15);
+  ceezWalkAction?.fadeOut(0.15);
   ceezThrowAction?.fadeOut(0.15);
   ceezJumpOverObstaclesAction?.fadeOut(0.15);
   screenMenu?.classList.remove("hidden");
@@ -3844,10 +4097,10 @@ function updateHud(dt) {
     } else if (level1EndCinematicStarted) {
       hudDistance.textContent = `Finishing…`;
     } else if (passedFinishRibbon) {
-      hudDistance.textContent = `Past the line · ${elapsedSecs.toFixed(1)} s`;
+      hudDistance.textContent = `${elapsedSecs.toFixed(1)} s`;
     } else {
       const remain = Math.max(0, Math.ceil(FINISH_RIBBON_Z - runDistanceTraveledM));
-      hudDistance.textContent = `${remain} m to line · ${elapsedSecs.toFixed(1)} s`;
+      hudDistance.textContent = `${remain} m · ${elapsedSecs.toFixed(1)} s`;
     }
   }
 }
@@ -3869,14 +4122,15 @@ function stepPlaying(dt) {
     const latTarget = LANES[laneIndex];
     const latErr = latTarget - lat;
     const kb = getControlMode() === "kb";
-    const forwardActive = kb ? kbForwardHeld() : true;
+    const locomotion = isForwardLocomotionActive();
+    const sprint = isRunSprintActive();
     const vR_desired = kb ? 0 : latErr * LANE_SMOOTH;
     const blocked = level1VictoryFreeze;
-    const vF_desired = blocked || !forwardActive ? 0 : FORWARD_SPEED;
+    const vF_mag = blocked || !locomotion ? 0 : sprint ? FORWARD_SPEED : WALK_SPEED;
     if (!blocked) {
-      playerBody.velocity.x = F.x * vF_desired + R.x * vR_desired;
-      playerBody.velocity.z = F.z * vF_desired + R.z * vR_desired;
-      if (forwardActive) runDistanceTraveledM += FORWARD_SPEED * dt;
+      playerBody.velocity.x = F.x * vF_mag + R.x * vR_desired;
+      playerBody.velocity.z = F.z * vF_mag + R.z * vR_desired;
+      if (locomotion) runDistanceTraveledM += vF_mag * dt;
     } else {
       playerBody.velocity.x = 0;
       playerBody.velocity.z = 0;
@@ -3896,7 +4150,6 @@ function stepPlaying(dt) {
   spawnContentAhead();
   cullBehind();
   syncVisibleRunwayPlane();
-  syncFinishLineVisualWorldPose();
   if (COINS_ENABLED) {
     updateCoinsVisual();
     checkCoinCollection();
@@ -4124,13 +4377,13 @@ function bindUi() {
       }
       if (state !== "playing" || runPaused) return;
       if (level1VictoryFreeze || level1EndCinematicStarted) return;
+      if (e.code === "KeyZ") {
+        e.preventDefault();
+        if (!e.repeat) kbKeyZHeld = true;
+        return;
+      }
       const kbKeys = getControlMode() === "kb";
       if (kbKeys) {
-        if (e.code === "KeyZ") {
-          e.preventDefault();
-          if (!e.repeat) kbKeyZHeld = true;
-          return;
-        }
         if (e.code === "ArrowLeft" || e.code === "KeyA") {
           e.preventDefault();
           if (!e.repeat) {
@@ -4198,12 +4451,12 @@ function bindUi() {
   window.addEventListener(
     "keyup",
     (e) => {
+      if (e.code === "KeyZ") kbKeyZHeld = false;
       if (getControlMode() !== "kb") return;
       if (e.code === "ArrowLeft") onKbLeftArrowUp();
       if (e.code === "ArrowRight") onKbRightArrowUp();
       if (e.code === "KeyA") kbKeyADown = false;
       if (e.code === "KeyD") kbKeyDDown = false;
-      if (e.code === "KeyZ") kbKeyZHeld = false;
     },
     true
   );
