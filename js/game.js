@@ -6,11 +6,11 @@ import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { clone as cloneSkinnedHierarchy } from "three/addons/utils/SkeletonUtils.js";
 import * as CANNON from "cannon-es";
 
-/** Three lane offsets perpendicular to current run heading. `laneIndex` 0 | 1 | 2. {@link tryNavigateLaneOrTurnLeft} / laneRight: tap = lane, double-tap or Shift = 90° corner. */
-const LANES = [-1.82, 0, 1.82];
+/** Four lane centers across the rooftop strip (`laneIndex` 0…3). {@link tryNavigateLaneOrTurnLeft} / Right step one lane (HUD + keyboard). */
+const LANES = [-3.75, -1.25, 1.25, 3.75];
 /** Forward run speed (m/s-ish) for touch / 1h / 2h — full tilt. */
 const FORWARD_SPEED = 11;
-/** Keyboard: always moves forward at this speed; hold Z for {@link FORWARD_SPEED} sprint. */
+/** Keyboard: continuous run at {@link FORWARD_SPEED} (same as sprint); lanes use arrow keys. */
 const WALK_SPEED = 4.75;
 /** When no dedicated walk FBX: slow the run clip for KB stroll. */
 const WALK_RUN_ANIM_TIME_SCALE = 0.52;
@@ -18,6 +18,8 @@ const LANE_SMOOTH = 14;
 const PLAYER_HALF = new CANNON.Vec3(0.28, 0.88, 0.24);
 /** Top Y of runway collider — must match ground tile `body.position.y` + box half Y in `buildGroundTiles` / `recycleGroundTiles`. */
 const RUNWAY_SURFACE_Y = 0.14 + 0.14;
+/** While Space jump clip plays: slow it slightly so limb motion reads softer in the air. */
+const JUMP_IN_AIR_TIME_SCALE = 0.48;
 /** Space + JumpOverObstacles clip — upward velocity (world gravity Y ≈ −32). */
 const SPACE_JUMP_VY = 13.5;
 const SPACE_JUMP_GROUND_EPS = 0.14;
@@ -41,20 +43,13 @@ const DIR_ASSETS = "./assets/";
 const DIR_PLACEHOLDERS = `${DIR_ASSETS}placeholders/`;
 
 /**
- * Neighbourhood colours — how to change them
- * ---------------------------------------------------------------------------
- * **All browns in the city GLB** are driven from this file (hard-refresh after edits).
- *
- * | What you want | Where to edit |
- * |----------------|---------------|
- * | Wall / façade brown shades, mortar | Constants `NEIGHBOURHOOD_BUILDING_*`, array `_BUILDING_BROWNS` in {@link paintNeighbourhoodBuildingVertexPattern} |
- * | How strong the dark “mortar” lines are | `isMortar` thresholds + `NEIGHBOURHOOD_BUILDING_MORTAR` inside {@link paintNeighbourhoodBuildingVertexPattern} |
- * | Streets / plazas in the imported city (name matches “road”, “sidewalk”, …) | `NEIGHBOURHOOD_CITY_GROUND_BROWN_VERTEX` + road branch in {@link applyNeighbourhoodBuildingMaterials} |
- * | Which meshes count as “windows” (painted like façades — same brown pattern) | Regex `NEIGHBOURHOOD_WINDOW_NAME_RE` + {@link isNeighbourhoodWindowMesh} |
- * | Trees | `NEIGHBOURHOOD_LEAF_*`, `NEIGHBOURHOOD_BARK_*` and the `paintNeighbourhoodTree*` helpers |
- * | One place that applies everything | {@link applyNeighbourhoodBuildingMaterials} |
- *
- * The **playable runway deck** (`visibleRunwayPlane` / recycled tiles) is separate — still grey asphalt for contrast.
+ * Procedural rooftop world — tune here (hard-refresh after edits).
+ * | What | Constants / functions |
+ * |------|------------------------|
+ * | Roof + gap rhythm | `BUILDING_DEPTH`, `BUILDING_GAP`, `BUILDING_CYCLE`, `isRooftopGap` |
+ * | Run strip width | `BUILDING_WIDTH`, `LANES` (four lanes) |
+ * | Façade / gravel look | `BUILDING_FACADE_*`, `BUILDING_MORTAR`, `ROOFTOP_SURFACE_COLOR` |
+ * | Skyline depth | `buildSkylineBuilding`, `buildSkylinePool` |
  */
 
 const LEVEL1_END_VIDEO_SRC = `${DIR_ANIM}level1-end.mp4`;
@@ -62,90 +57,50 @@ const LEVEL1_END_VIDEO_SRC = `${DIR_ANIM}level1-end.mp4`;
 const LEVEL1_END_VIDEO_ENABLED = false;
 /** When {@link LEVEL1_END_VIDEO_ENABLED} is false, time on end overlay before return to menu (ms). */
 const LEVEL1_END_OVERLAY_MIN_MS_NO_VIDEO = 4000;
-/** Active world backdrop GLB (materials in {@link applyNeighbourhoodBuildingMaterials}); local first, then GitHub raw. */
-const NEIGHBOURHOOD_WORLD_GLB = "neighbourhood_city_modular_lowpoly.glb";
-const NEIGHBOURHOOD_CITY_GLB_URLS = [
-  `${DIR_ENV}${NEIGHBOURHOOD_WORLD_GLB}`,
-  `https://raw.githubusercontent.com/iflipbrands/SkyHustle/main/environment/${NEIGHBOURHOOD_WORLD_GLB}`,
-];
-/** Flat asphalt when {@link RUNWAY_ASPHALT_MAP} is missing. */
-const NEIGHBOURHOOD_ASPHALT_COLOR = 0x3a3e44;
-/** Multiplier on textured asphalt — dark charcoal grey streets. */
-const NEIGHBOURHOOD_ASPHALT_TINT = 0x45494e;
-/** Vertex paint for roads / runway (matches asphalt). */
-const NEIGHBOURHOOD_ASPHALT_VERTEX = 0x404448;
-/** Brown for city GLB ground meshes (roads, sidewalks, etc.) — see colour guide above. */
-const NEIGHBOURHOOD_CITY_GROUND_BROWN_VERTEX = 0x6e5a48;
-/** Realistic facade browns (vertex-painted mortar + brick variation). */
-const NEIGHBOURHOOD_BUILDING_BROWN_A = 0x946a52;
-const NEIGHBOURHOOD_BUILDING_BROWN_B = 0x846050;
-/** Mortar lines — keep lighter than brick so nothing reads black in shadow. */
-const NEIGHBOURHOOD_BUILDING_MORTAR = 0x786056;
-/** Tree canopy greens. */
-const NEIGHBOURHOOD_LEAF_A = 0x4a9348;
-const NEIGHBOURHOOD_LEAF_B = 0x3a7a3a;
-/** Tree trunk / branch bark. */
-const NEIGHBOURHOOD_BARK_A = 0x4a3228;
-const NEIGHBOURHOOD_BARK_B = 0x5c4033;
-/** Multiplies brick texture when used elsewhere (buildings use vertex color only). */
-const NEIGHBOURHOOD_BRICK_TINT_A = 0xd4a070;
-const NEIGHBOURHOOD_BRICK_TINT_B = 0xc49060;
-/** Street furniture / vehicles. */
-const NEIGHBOURHOOD_PROP_VERTEX = 0x6a6e76;
-/** Clear-color fallback (horizon) when the sky dome has not drawn yet. */
+/** Rooftop surface color (dark gravel). */
+const ROOFTOP_SURFACE_COLOR = 0x3a3c3e;
+/** Building facade brick color A. */
+const BUILDING_FACADE_A = 0x8a6a58;
+/** Building facade brick color B. */
+const BUILDING_FACADE_B = 0x9a7a66;
+/** Building facade mortar / dark lines. */
+const BUILDING_MORTAR = 0x5a4a42;
+/** Sky horizon color at dusk. */
 const RUN_SCENE_BACKGROUND = 0xff7a4a;
-/** Sunset gradient stops (bottom → top). */
+/** Sunset gradient stops (bottom to top). */
 const SUNSET_SKY_HORIZON = 0xff7a4a;
 const SUNSET_SKY_LOW = 0xff5a6e;
 const SUNSET_SKY_MID = 0xc94d8a;
 const SUNSET_SKY_HIGH = 0x6b4a9e;
 const SUNSET_SKY_ZENITH = 0x2a3a72;
-/** Red brick facade (shared material on many meshes). */
-const NEIGHBOURHOOD_BRICK_RED = 0x8f3d38;
-/** Tan / buff brick facade. */
-const NEIGHBOURHOOD_BRICK_TAN = 0xc8ae86;
-/** Window glass / frames read as black. */
-const NEIGHBOURHOOD_WINDOW_BLACK = 0x0a0a0c;
-/**
- * Applied after fitting the GLB into {@link NEIGHBOURHOOD_RUN_WIDTH} × {@link NEIGHBOURHOOD_RUN_LENGTH}.
- * Post-fit uniform scale on the backdrop GLB (linear size ∝ this value).
- */
-/** Tuned for {@link NEIGHBOURHOOD_WORLD_GLB} modular city (Paris track used a lower boost). */
-const NEIGHBOURHOOD_SCALE_BOOST = 17.4;
-/**
- * Stretcher-bond scale on facades (triplanar UVs): U = horizontal along wall, V = vertical.
- * Smaller values = more bricks; U > V keeps each brick wider than tall (horizontal long).
- */
-const NEIGHBOURHOOD_BRICK_METERS_U = 0.95;
-const NEIGHBOURHOOD_BRICK_METERS_V = 0.34;
-/** Minimum time the level-end overlay stays up (video + tint + copy), ms. */
+/** Minimum time the level-end overlay stays up, ms. */
 const LEVEL1_END_MIN_DURATION_MS = 12000;
 /** Player spawn +Z at level run start. */
 const RUN_START_Z = 210;
-/** Keep the front of the fitted neighbourhood a bit behind spawn so the run “starts at the beginning” of the asset. */
-const NEIGHBOURHOOD_SPAWN_LEAD_Z = 18;
-/**
- * Neighbourhood strip length (m) along +Z for fitting the modular GLB
- * (covers ribbon, gap, and landing band in world +Z).
- */
-const NEIGHBOURHOOD_RUN_LENGTH = Math.max(520, LEVEL1_LAND_COMPLETE_MIN_Z + 160);
-/**
- * Cross-run fit (m): ~3 vehicle lanes; slightly tighter than 42 m so scale + alignment match the GLB street.
- */
-const NEIGHBOURHOOD_RUN_WIDTH = 30;
+/** How deep (Z) each rooftop building platform is. */
+const BUILDING_DEPTH = 28;
+/** Gap between buildings the player must clear by jumping. */
+const BUILDING_GAP = 5.0;
+/** One tile cycle = one rooftop + one gap. */
+const BUILDING_CYCLE = BUILDING_DEPTH + BUILDING_GAP;
+/** Rooftop width — fits four run lanes with side ledges. */
+const BUILDING_WIDTH = 12.2;
+/** Height of building facades visible below the rooftop edge. */
+const BUILDING_FACADE_HEIGHT = 24;
+/** How many building platforms to keep in the recycling pool. */
+const BUILDING_POOL = 14;
+/** Legacy — keep so physics tile references still compile. */
+const NEIGHBOURHOOD_RUN_WIDTH = BUILDING_WIDTH;
+
 /** Looping run music (respects Music on/off in settings). */
 const GAME_MUSIC_SRC = `${DIR_AUDIO}ceezandray_gamemusic.mp3`;
-const TILE_Z = 10;
-const TILE_POOL = 24;
-/** Solid runway between gaps — ~6–7 s of run at {@link FORWARD_SPEED}, then one TILE_Z gap. */
-const RUNWAY_GAP_EVERY_SECONDS = 6.5;
-const SOLID_TILES_BETWEEN_GAPS = Math.max(1, Math.round((FORWARD_SPEED * RUNWAY_GAP_EVERY_SECONDS) / TILE_Z));
-const TILES_PER_RUNWAY_CYCLE = SOLID_TILES_BETWEEN_GAPS + 1;
-const ENABLE_GAPS = false;
+/** Legacy constant — kept to avoid any residual reference errors. */
+const TILE_Z = BUILDING_CYCLE;
+const ENABLE_GAPS = true;
 const SPAWN_Z_AHEAD_MIN = 28;
 const SPAWN_Z_AHEAD_MAX = 72;
 /** Spawn at most one obstacle row every this many ground-tile advances (~{@link TILE_Z} m each). */
-const OBSTACLE_BUILDING_INTERVAL = 5;
+const OBSTACLE_BUILDING_INTERVAL = 3;
 const DUMPSTER_FBX_CANDIDATES = [`${DIR_ENV}dumpster.fbx`];
 /** Procedural corrugated trash can (atlas UVs) — diffuse / bump / spec in `assets/trashcan/`. */
 const TRASHCAN_DIFFUSE = `${DIR_ASSETS}trashcan/diffuse.jpg`;
@@ -155,17 +110,15 @@ const TRASHCAN_SPEC = `${DIR_ASSETS}trashcan/spec.jpg`;
 const RUNWAY_ASPHALT_MAP = `${DIR_ASSETS}asphalt_road.png`;
 /** Brick running-bond facade for walls / buildings. */
 const NEIGHBOURHOOD_BRICK_MAP = `${DIR_ASSETS}brick_wall.png`;
-/** Painted sunset sky (author art) — {@link scene.background}. */
+/** Reference skyline photo (game + menu). Fallback: {@link SKY_BACKGROUND_MAP}. */
+const RUN_CITY_PHOTO_MAP = `${DIR_ASSETS}run-city-sunset-bg.png`;
+/** Painted sunset sky (fallback if photo missing). */
 const SKY_BACKGROUND_MAP = `${DIR_ASSETS}sky_sunset.png`;
 const INVINCIBLE_MS = 2200;
 const ACTION_COOLDOWN_MS = 220;
-/** Second left/right tap within this window → 90° corner (no extra lane step). */
-const TURN_DOUBLE_TAP_MS = 400;
-/** Avoid chained micro-rotations from noisy input. */
-const WORLD_RUN_TURN_COOLDOWN_MS = 380;
-const COINS_ENABLED = false;
-/** Obstacles off — neighbourhood run only. */
-const OBSTACLES_ENABLED = false;
+const COINS_ENABLED = true;
+/** Dumpster / trashcan rows on rooftops when variants load in bootstrap. */
+const OBSTACLES_ENABLED = true;
 
 const RAY_BASE_X = 0.35;
 const RAY_BASE_Y = 1.35;
@@ -181,11 +134,9 @@ const CAMERA_LOOK_AHEAD = 8.8;
 const CAMERA_LOOK_HEIGHT_OFFSET = 0.64;
 /** Chase cam eases behind heading after hard turns (0–1 per frame; higher = snappier). */
 const CAMERA_BEHIND_SMOOTH = 0.2;
-/** KB: while ←/→ is held, turn rate along the run (rad/s); smooth curve, no double-tap. */
-/** KB hold ←/→: turn rate ramps up while the key stays down (sports-style steer). */
-const KB_STEER_RATE_MIN = 0.32;
-const KB_STEER_RATE_MAX = 1.08;
-const KB_STEER_RAMP_SEC = 0.9;
+const KB_FACING_FROM_VEL_RATE = 11;
+/** KB: when nearly stopped, ease facing back toward run corridor (1/s). */
+const KB_FACING_SNAP_BACK_RATE = 5.5;
 
 const CEEZ_OBJ_DIR = `${DIR_CHAR}Ceez/`;
 const CEEZ_OBJ_FILE = "ceez.obj";
@@ -202,16 +153,18 @@ const CEEZ_GLTF_CANDIDATES = [
 const CEEZ_TRIPO_FBX = `${CEEZ_OBJ_DIR}new/tripo_convert_66ed1f4e-9533-48ac-b540-39e1883a9540.fbx`;
 /** Split-file rig setup: base mesh + separate action FBX clips. */
 const CEEZ_BASE_FBX = `${CEEZ_OBJ_DIR}new/c1.fbx`;
-const CEEZ_RUN_ACTION_FBX = `${CEEZ_OBJ_DIR}new/FastRun.fbx`;
+/** Primary loop locomotion — `animations/RunFast.fbx` (continuous run while playing). */
+const CEEZ_RUN_ACTION_FBX = `${DIR_ANIM}RunFast.fbx`;
 const CEEZ_THROW_ACTION_FBX = `${CEEZ_OBJ_DIR}new/RunAndThrow.fbx`;
 /** Optional one-shot on Space — same rig as split / Meshy + FastRun. */
 const CEEZ_JUMP_OVER_OBSTACLES_FBX = `${DIR_ANIM}JumpOverObstacles.fbx`;
-/** Walk cycle (extensionless FBX) — `animations/Walking`; same rig as FastRun. */
+/** Walk cycle — `animations/Walking` (extensionless) or `Walking.fbx`; same rig as FastRun. */
 const CEEZ_WALKING_FBX = `${DIR_ANIM}Walking`;
+const CEEZ_WALKING_FBX_URLS = [CEEZ_WALKING_FBX, `${DIR_ANIM}Walking.fbx`];
 /** Skinned mesh only (Meshy materials preserved). */
 const CEEZ_MESHY_CHARACTER_FBX = `${DIR_CHAR}Ceez_Meshy.fbx`;
-/** Sole locomotion source for {@link CEEZ_MESHY_CHARACTER_FBX} (no embedded / merged pack clips). */
-const CEEZ_MESHY_RUNFAST_ANIM_FBX = `${DIR_ANIM}RunFast.fbx`;
+/** Same rig as meshy / split — external run clip (see {@link CEEZ_RUN_ACTION_FBX}). */
+const CEEZ_MESHY_RUNFAST_ANIM_FBX = CEEZ_RUN_ACTION_FBX;
 const CEEZ_FBX_CANDIDATES = [
   CEEZ_RUN_ACTION_FBX,
   `${CEEZ_OBJ_DIR}ceez.fbx`,
@@ -223,7 +176,7 @@ const CEEZ_FBX_CANDIDATES = [
 /** Target height (m) for Ceez mesh after load — tuned to match prior placeholder scale. */
 const CEEZ_TARGET_HEIGHT = 1.75;
 /** Bump when changing orientation/UV so the cached Ceez template reloads. */
-const CEEZ_LOADER_REV = 15;
+const CEEZ_LOADER_REV = 16;
 /**
  * OBJ/GLTF “forward” is often +X or −Z while run direction is +Z.
  * If Ceez still faces sideways, try 0, ±Math.PI/2, or Math.PI.
@@ -358,6 +311,9 @@ const _runForward = new THREE.Vector3(0, 0, 1);
 const _runRight = new THREE.Vector3(1, 0, 0);
 /** Forward axis before a corner (for re-anchoring runOrigin). */
 const _tmpFold = new THREE.Vector3();
+/** KB: smoothed horizontal facing for mesh + camera (blends toward velocity). */
+const _kbFacingSm = new THREE.Vector3(0, 0, 1);
+const _kbFacingHint = new THREE.Vector3();
 /** @type {THREE.AnimationMixer | null} */
 let ceezAnimMixer = null;
 /** @type {THREE.AnimationAction | null} */
@@ -391,22 +347,14 @@ let level1WinScore = 0;
 /** @type {"rooftop"} */
 let runSegment = "rooftop";
 /** Grey deck under the lanes — physics tiles have no mesh; this is what you “run on”. */
-let visibleRunwayPlane = null;
-/** Seamless asphalt from {@link RUNWAY_ASPHALT_MAP}. */
-let runwayAsphaltTex = null;
-/** Loaded sky image for {@link THREE.Scene.background}. */
 let skyBackgroundImageTex = null;
-/** Procedural gradient if {@link SKY_BACKGROUND_MAP} fails to load. */
 let skyBackgroundFallbackTex = null;
-/** Warm key light that follows the run so facades stay readable. */
 let runFacadeLight = null;
 let runFillLight = null;
-/** Brick wall diffuse from {@link NEIGHBOURHOOD_BRICK_MAP}. */
-let neighbourhoodBrickTex = null;
-/** Large flat Cannon slab so strafing / 90° turns stay on collider (narrow recycled tiles are +Z only). */
-let neighbourhoodWideGroundBody = null;
-/** Imported modular neighbourhood (visible after {@link buildNeighbourhoodWorld}). */
-let neighbourhoodWorldGroup = null;
+/** Recycled rooftop building platforms (mesh + physics body pairs). */
+let rooftopBuildings = [];
+/** Pool of background skyline meshes (decorative, no physics). */
+let skylineBuildings = [];
 /** @type {HTMLAudioElement | null} */
 let gameMusicEl = null;
 
@@ -425,22 +373,10 @@ let ceezObjFallbackTexPromise = null;
 let ceezHoodiePatternTexPromise = null;
 
 let laneIndex = 1;
-let laneNavLastLeftMs = 0;
-let laneNavLastRightMs = 0;
-let lastWorldRunTurnAtMs = 0;
 /** Prevents double-start when both click + pointer fire on “Enter Level 1”. */
 let tryEnterLevelFromPrelevelInFlight = false;
-/** KB (only): ←/→ (or A/D) hold to steer; longer hold = faster turn. */
-let kbArrowLeftDown = false;
-let kbArrowRightDown = false;
-let kbKeyADown = false;
-let kbKeyDDown = false;
-/** Hold Z for sprint speed + full run cycle; 1H/2H on phones still auto-sprint. */
+/** Legacy: Z could sprint on KB; keyboard now always runs at full speed — kept for blur reset only. */
 let kbKeyZHeld = false;
-let kbSteerLeftHoldSec = 0;
-let kbSteerRightHoldSec = 0;
-/** @type {Promise<void> | null} */
-let neighbourhoodLoadPromise = null;
 let coins = 0;
 let lives = 3;
 let invincibleUntil = 0;
@@ -773,6 +709,7 @@ async function tryBindJumpOverObstaclesAction(mixer, runAction) {
     }
     const clip = animationClipWithoutRootPositionTracks(raw);
     const jumpAction = mixer.clipAction(clip);
+    jumpAction.timeScale = JUMP_IN_AIR_TIME_SCALE;
     bindOneShotReturnsToRun(mixer, runAction, jumpAction);
     console.info(`[Ceez Jump] bound "${raw.name || "(unnamed)"}" from JumpOverObstacles.fbx`);
     return jumpAction;
@@ -796,10 +733,11 @@ function syncCeezWalkRunLocomotionWeights() {
     const playLoco = locomotion || sprint;
     ceezRunAction.enabled = true;
     ceezRunAction.setEffectiveWeight(playLoco ? 1 : 0);
-    if (playLoco && !ceezRunAction.isRunning()) {
-      ceezRunAction.reset().fadeIn(0.08).play();
-    }
     if (playLoco) {
+      ceezRunAction.paused = false;
+      if (!ceezRunAction.isRunning()) {
+        ceezRunAction.reset().fadeIn(0.08).play();
+      }
       ceezRunAction.timeScale = sprint ? 1 : WALK_RUN_ANIM_TIME_SCALE;
     }
     return;
@@ -815,6 +753,7 @@ function syncCeezWalkRunLocomotionWeights() {
   if (sprint) {
     ceezWalkAction.setEffectiveWeight(0);
     ceezRunAction.setEffectiveWeight(1);
+    ceezRunAction.paused = false;
     if (!ceezRunAction.isRunning()) ceezRunAction.reset().fadeIn(0.08).play();
     ceezRunAction.timeScale = 1;
   } else {
@@ -831,27 +770,30 @@ function syncCeezWalkRunLocomotionWeights() {
  */
 async function tryBindWalkingLocomotion(mixer) {
   if (!mixer) return null;
-  try {
-    const src = await loadFbx(CEEZ_WALKING_FBX);
-    const clips = collectAnimationClips(src, src.animations || []);
-    const raw = pickWalkingClip(clips);
-    if (!raw) {
-      console.warn(`[Ceez Walk] No clip in ${CEEZ_WALKING_FBX}`);
-      return null;
+  for (const url of CEEZ_WALKING_FBX_URLS) {
+    try {
+      const src = await loadFbx(url);
+      const clips = collectAnimationClips(src, src.animations || []);
+      const raw = pickWalkingClip(clips);
+      if (!raw) {
+        console.warn(`[Ceez Walk] No clip in ${url}`);
+        continue;
+      }
+      const clip = animationClipWithoutRootPositionTracks(raw);
+      const walkAction = mixer.clipAction(clip);
+      walkAction.setLoop(THREE.LoopRepeat, Infinity);
+      walkAction.clampWhenFinished = false;
+      walkAction.enabled = true;
+      walkAction.setEffectiveWeight(0);
+      walkAction.play();
+      console.info(`[Ceez Walk] bound "${raw.name || "(unnamed)"}" from ${url}`);
+      return walkAction;
+    } catch {
+      // try next URL
     }
-    const clip = animationClipWithoutRootPositionTracks(raw);
-    const walkAction = mixer.clipAction(clip);
-    walkAction.setLoop(THREE.LoopRepeat, Infinity);
-    walkAction.clampWhenFinished = false;
-    walkAction.enabled = true;
-    walkAction.setEffectiveWeight(0);
-    walkAction.play();
-    console.info(`[Ceez Walk] bound "${raw.name || "(unnamed)"}" from ${CEEZ_WALKING_FBX}`);
-    return walkAction;
-  } catch (err) {
-    console.warn("[Ceez Walk] Walking FBX failed (missing path or rig mismatch).", err);
-    return null;
   }
+  console.warn("[Ceez Walk] No Walking FBX could be loaded from:", CEEZ_WALKING_FBX_URLS.join(", "));
+  return null;
 }
 
 function pickWalkingClip(clips) {
@@ -877,6 +819,7 @@ function bindOneShotReturnsToRun(mixer, runAction, oneShot) {
   oneShot.setEffectiveWeight(0);
   mixer.addEventListener("finished", (e) => {
     if (e.action !== oneShot) return;
+    oneShot.timeScale = 1;
     oneShot.stop();
     oneShot.enabled = false;
     oneShot.setEffectiveWeight(0);
@@ -1239,7 +1182,7 @@ async function tryBindFastRunAnimationsToRoot(root) {
     }
     const anim = attachSplitActions(root, runClips, throwClips);
     if (!anim) return null;
-    console.info("[Ceez] bound FastRun.fbx locomotion to existing skinned mesh.");
+    console.info("[Ceez] bound RunFast.fbx locomotion to existing skinned mesh.");
     return anim;
   } catch (err) {
     console.warn("[Ceez] tryBindFastRunAnimationsToRoot failed", err);
@@ -1248,12 +1191,12 @@ async function tryBindFastRunAnimationsToRoot(root) {
 }
 
 /**
- * Split pipeline: FastRun.fbx (+ RunAndThrow.fbx, optional c1.fbx mesh).
+ * Split pipeline: `animations/RunFast.fbx` (+ RunAndThrow.fbx, optional c1.fbx mesh).
  * @returns {Promise<{ root: THREE.Object3D; mixer: THREE.AnimationMixer; runAction: THREE.AnimationAction; throwAction: THREE.AnimationAction | null } | null>}
  */
 async function tryLoadCeezFromSplitFiles() {
   try {
-    // Use FastRun.fbx as the primary animated rig so tracks always match the mesh.
+    // Use animations/RunFast.fbx as the primary animated rig so tracks always match the mesh.
     const runSrc = await loadFbx(CEEZ_RUN_ACTION_FBX);
     const runClips = collectAnimationClips(runSrc, runSrc.animations || []);
     let throwClips = [];
@@ -1305,7 +1248,7 @@ async function tryLoadCeezFromSplitFiles() {
 
     const anim = attachSplitActions(root, runClips, throwClips);
     if (!anim) {
-      console.warn("[Ceez Split] unable to bind run clip from FastRun.fbx");
+      console.warn("[Ceez Split] unable to bind run clip from RunFast.fbx");
       return null;
     }
     if (!pickRunAnimationClip(runClips) && runClips.length > 0) {
@@ -1431,7 +1374,7 @@ async function tryLoadCeezAnimated() {
   // Full character in one file: mesh + FastRun clip (when split pipeline is skipped).
   const fastRunStandalone = await tryLoadCeezFromFbx(CEEZ_RUN_ACTION_FBX);
   if (fastRunStandalone?.mixer && fastRunStandalone?.runAction) {
-    console.info("[Ceez] using standalone FastRun.fbx for mesh + run cycle.");
+    console.info("[Ceez] using standalone RunFast.fbx for mesh + run cycle.");
     return fastRunStandalone;
   }
 
@@ -1530,17 +1473,20 @@ function getControlMode() {
   return "kb";
 }
 
-/** True while the character should advance along the track (KB: walk without keys; touch: as before). */
+/**
+ * Forward locomotion clip(s) should play whenever possible (never idle bind pose on the run).
+ * Jump one-shot still clears this inside {@link syncCeezWalkRunLocomotionWeights} via
+ * {@link isJumpOverObstaclesPoseActive}. Level-end cinematic stops motion pose here.
+ */
 function isForwardLocomotionActive() {
-  if (level1VictoryFreeze || level1EndCinematicStarted) return false;
-  const mode = getControlMode();
-  if ((mode === "1h" || mode === "2h") && "ontouchstart" in window) return true;
-  return mode === "kb";
+  if (level1EndCinematicStarted) return false;
+  return true;
 }
 
-/** Sprint: full {@link FORWARD_SPEED} + run anim at full speed. Touch 1H/2H always sprint on phones. */
+/** Sprint: full {@link FORWARD_SPEED} + run anim at full speed. Keyboard = always continuous run. */
 function isRunSprintActive() {
   if (level1VictoryFreeze || level1EndCinematicStarted) return false;
+  if (getControlMode() === "kb") return true;
   const mode = getControlMode();
   if ((mode === "1h" || mode === "2h") && "ontouchstart" in window) return true;
   return kbKeyZHeld;
@@ -1941,14 +1887,18 @@ function getSunsetSkyBackgroundTexture() {
 
 async function tryLoadSkyBackgroundOnce() {
   if (skyBackgroundImageTex) return;
-  try {
-    const t = await new THREE.TextureLoader().loadAsync(SKY_BACKGROUND_MAP);
-    t.colorSpace = THREE.SRGBColorSpace;
-    t.mapping = THREE.UVMapping;
-    skyBackgroundImageTex = t;
-    applyRunSceneBackdrop();
-  } catch (err) {
-    console.warn("[Sky] Background image failed", err);
+  const loader = new THREE.TextureLoader();
+  for (const url of [RUN_CITY_PHOTO_MAP, SKY_BACKGROUND_MAP]) {
+    try {
+      const t = await loader.loadAsync(url);
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.mapping = THREE.UVMapping;
+      skyBackgroundImageTex = t;
+      applyRunSceneBackdrop();
+      return;
+    } catch (err) {
+      console.warn("[Sky] Background image failed:", url, err);
+    }
   }
 }
 
@@ -2069,7 +2019,7 @@ function initPhysics() {
     mass: 78,
     shape,
     material: playerMat,
-    linearDamping: 0.08,
+    linearDamping: 0.035,
     angularDamping: 1,
   });
   playerBody.fixedRotation = true;
@@ -2081,17 +2031,8 @@ function initPhysics() {
 }
 
 function isGapSegment(baseZ) {
-  if (!ENABLE_GAPS) return false;
-  if (baseZ === LEVEL1_GAP_TILE_CENTER_Z) return true;
-  const tileIndex = Math.floor(baseZ / TILE_Z);
-  if (tileIndex <= 4) return false;
-  /** Finish ribbon + landing: only the scripted gap tile is open; rest stays solid. */
-  if (baseZ >= FINISH_RIBBON_Z - TILE_Z * 2 && baseZ <= LEVEL1_LAND_COMPLETE_MIN_Z + TILE_Z) {
-    return baseZ === LEVEL1_GAP_TILE_CENTER_Z;
-  }
-  const mod =
-    ((tileIndex % TILES_PER_RUNWAY_CYCLE) + TILES_PER_RUNWAY_CYCLE) % TILES_PER_RUNWAY_CYCLE;
-  return mod === SOLID_TILES_BETWEEN_GAPS;
+  // Delegated to rooftop gap system
+  return isRooftopGap(baseZ);
 }
 
 function onBeginContact(event) {
@@ -2106,7 +2047,8 @@ function onBeginContact(event) {
   lives -= 1;
   updateHeartsDom();
   if (lives <= 0) {
-    endGameLoss();
+    const score = Math.max(0, Math.floor(runDistanceTraveledM)) + coins * 100;
+    showGameOverScreen(score);
     return;
   }
   invincibleUntil = performance.now() + INVINCIBLE_MS;
@@ -2127,10 +2069,10 @@ function playCeezThrowAnim() {
   ceezThrowAction.play();
 }
 
-/** True while Space jump clip is active — run must stay at 0 weight or it masks the pose. */
+/** True while the Space jump one-shot is actively playing — run stays off so legs/arms use the jump clip only. */
 function isJumpOverObstaclesPoseActive() {
   const a = ceezJumpOverObstaclesAction;
-  return Boolean(a?.enabled);
+  return Boolean(a?.enabled && a.isRunning());
 }
 
 function isPlayerGroundedForSpaceJump() {
@@ -2161,6 +2103,7 @@ function playJumpOverObstaclesAnim() {
 
   ceezJumpOverObstaclesAction.reset();
   ceezJumpOverObstaclesAction.enabled = true;
+  ceezJumpOverObstaclesAction.timeScale = JUMP_IN_AIR_TIME_SCALE;
   ceezJumpOverObstaclesAction.setEffectiveWeight(1);
   ceezJumpOverObstaclesAction.play();
 
@@ -2489,7 +2432,32 @@ function updateProjectiles(dt) {
     pr.mesh.rotation.x += dt * (pr.kind === "banana" ? 5 : 3);
     const z = pr.mesh.position.z;
     const y = pr.mesh.position.y;
-    if (z > pz + 95 || z < pz - 25 || y < RUNWAY_SURFACE_Y - 2) {
+
+    // Check if projectile hit an obstacle — knock it flying off the rooftop
+    let hitObstacle = false;
+    for (let j = obstacles.length - 1; j >= 0; j--) {
+      const obs = obstacles[j];
+      const op = obs.body.position;
+      const half = obs.body.shapes[0]?.halfExtents;
+      if (!half) continue;
+      const dx = Math.abs(pr.mesh.position.x - op.x);
+      const dy = Math.abs(pr.mesh.position.y - op.y);
+      const dz = Math.abs(pr.mesh.position.z - op.z);
+      const hr = pr.kind === "banana" ? 0.6 : 0.4;
+      if (dx < half.x + hr && dy < half.y + hr && dz < half.z + hr) {
+        obs.body.type = CANNON.Body.DYNAMIC;
+        obs.body.mass = 5;
+        obs.body.updateMassProperties();
+        obs.body.velocity.set((Math.random() - 0.5) * 4, 9 + Math.random() * 4, 14 + Math.random() * 6);
+        obs.body.angularVelocity.set((Math.random()-0.5)*9, (Math.random()-0.5)*9, (Math.random()-0.5)*9);
+        const dead = obstacles.splice(j, 1)[0];
+        setTimeout(() => { scene.remove(dead.mesh); world.removeBody(dead.body); }, 900);
+        hitObstacle = true;
+        break;
+      }
+    }
+
+    if (hitObstacle || z > pz + 95 || z < pz - 25 || y < RUNWAY_SURFACE_Y - 2) {
       scene.remove(pr.mesh);
       disposeProjectileResources(pr);
       projectiles.splice(i, 1);
@@ -2516,84 +2484,8 @@ function wrapAnglePi(ang) {
   return ((((ang + Math.PI) % twoPi) + twoPi) % twoPi) - Math.PI;
 }
 
-function kbSteerLeftHeld() {
-  return kbArrowLeftDown || kbKeyADown;
-}
-
-function kbSteerRightHeld() {
-  return kbArrowRightDown || kbKeyDDown;
-}
-
 function resetKbSteeringState() {
-  kbArrowLeftDown = false;
-  kbArrowRightDown = false;
-  kbKeyADown = false;
-  kbKeyDDown = false;
   kbKeyZHeld = false;
-  kbSteerLeftHoldSec = 0;
-  kbSteerRightHoldSec = 0;
-}
-
-function kbSteerYawRate(dt, holdSec, held) {
-  if (!held) {
-    return { rate: 0, holdSec: Math.max(0, holdSec - dt * 4) };
-  }
-  const nextHold = Math.min(KB_STEER_RAMP_SEC, holdSec + dt);
-  const u = nextHold / KB_STEER_RAMP_SEC;
-  const sm = u * u * (3 - 2 * u);
-  const rate = THREE.MathUtils.lerp(KB_STEER_RATE_MIN, KB_STEER_RATE_MAX, sm);
-  return { rate, holdSec: nextHold };
-}
-
-function onKbLeftArrowDown() {
-  kbArrowLeftDown = true;
-}
-
-function onKbLeftArrowUp() {
-  kbArrowLeftDown = false;
-}
-
-function onKbRightArrowDown() {
-  kbArrowRightDown = true;
-}
-
-function onKbRightArrowUp() {
-  kbArrowRightDown = false;
-}
-
-/**
- * Keyboard mode: walk forward automatically; hold ←/→ (or A/D) to steer; hold Z to sprint.
- */
-function applyKbArrowSteering(dt) {
-  if (getControlMode() !== "kb" || state !== "playing" || runPaused) return;
-  if (level1VictoryFreeze || level1EndCinematicStarted) return;
-  if (!playerBody) return;
-
-  const canSteer = isForwardLocomotionActive();
-  const left = canSteer && kbSteerLeftHeld();
-  const right = canSteer && kbSteerRightHeld();
-  const leftRamp = kbSteerYawRate(dt, kbSteerLeftHoldSec, left && !right);
-  const rightRamp = kbSteerYawRate(dt, kbSteerRightHoldSec, right && !left);
-  kbSteerLeftHoldSec = leftRamp.holdSec;
-  kbSteerRightHoldSec = rightRamp.holdSec;
-
-  let deltaYaw = 0;
-  if (left && !right) deltaYaw = leftRamp.rate * dt;
-  else if (right && !left) deltaYaw = -rightRamp.rate * dt;
-
-  if (Math.abs(deltaYaw) > 1e-6) {
-    _tmpFold.copy(_runForward);
-    committedRunYaw += deltaYaw;
-    committedRunYaw = wrapAnglePi(committedRunYaw);
-    yawSteer = 0;
-    syncWorldRunYawFromParts();
-    updateRunBasisVectors();
-    reanchorRunOriginAfterTurn(_tmpFold);
-  } else {
-    yawSteer *= Math.exp(-6 * dt);
-    if (Math.abs(yawSteer) < 0.004) yawSteer = 0;
-    syncWorldRunYawFromParts();
-  }
 }
 
 function updateRunBasisVectors() {
@@ -2614,49 +2506,12 @@ function reanchorRunOriginAfterTurn(prevForward) {
   runOrigin.set(p.x - F.x * t - R.x * L, 0, p.z - F.z * t - R.z * L);
 }
 
-function turnRunWorldBy(deltaYaw) {
-  if (state !== "playing" || runPaused || level1VictoryFreeze || level1EndCinematicStarted) return;
-  if (!playerBody) return;
-  const now = performance.now();
-  if (now - lastWorldRunTurnAtMs < WORLD_RUN_TURN_COOLDOWN_MS) return;
-  lastWorldRunTurnAtMs = now;
-  _tmpFold.copy(_runForward);
-  committedRunYaw += deltaYaw;
-  yawSteer = 0;
-  committedRunYaw = wrapAnglePi(committedRunYaw);
-  syncWorldRunYawFromParts();
-  updateRunBasisVectors();
-  reanchorRunOriginAfterTurn(_tmpFold);
-}
-
-function turnRunWorldLeft() {
-  turnRunWorldBy(Math.PI / 2);
-}
-
-function turnRunWorldRight() {
-  turnRunWorldBy(-Math.PI / 2);
-}
-
-/** Single tap = lane; quick second tap = 90° turn. Shift + side = turn only (no lane). */
+/** Lane step only (HUD / non-KB). No 90° corner. */
 function tryNavigateLaneOrTurnLeft() {
-  const now = performance.now();
-  if (now - laneNavLastLeftMs < TURN_DOUBLE_TAP_MS) {
-    laneNavLastLeftMs = 0;
-    turnRunWorldLeft();
-    return;
-  }
-  laneNavLastLeftMs = now;
   laneLeft();
 }
 
 function tryNavigateLaneOrTurnRight() {
-  const now = performance.now();
-  if (now - laneNavLastRightMs < TURN_DOUBLE_TAP_MS) {
-    laneNavLastRightMs = 0;
-    turnRunWorldRight();
-    return;
-  }
-  laneNavLastRightMs = now;
   laneRight();
 }
 
@@ -2756,55 +2611,228 @@ async function buildPlayer() {
   scene.add(playerRoot);
 }
 
+/** Replaced by buildRooftopBuildingPool — kept as no-op for call-site compatibility. */
 async function buildGroundTiles() {
-  /** Invisible Cannon slabs only — visuals are {@link neighbourhoodWorldGroup}. */
-  const emptyUserData = {
-    runway: null,
-    laneDividerL: null,
-    laneDividerR: null,
-    leftRoof: null,
-    rightRoof: null,
-    leftFacade: null,
-    rightFacade: null,
-    underShadow: null,
-    seamFront: null,
-    edgeFaceFront: null,
-    edgeFaceBack: null,
-    pit: null,
-    buildingTop: null,
-    body: null,
-  };
-  for (let i = 0; i < TILE_POOL; i++) {
-    const tile = new THREE.Group();
-    const body = new CANNON.Body({ mass: 0, material: groundPhysicsMaterial });
-    body.addShape(new CANNON.Box(new CANNON.Vec3(3.3, 0.14, TILE_Z * 0.5)));
-    body.position.set(0, 0.14, i * TILE_Z - TILE_Z * 4);
-    body.userData = { type: "groundTile" };
-    world.addBody(body);
-    tile.userData = { ...emptyUserData, body };
-    tile.position.set(0, 0, i * TILE_Z - TILE_Z * 4);
-    scene.add(tile);
-    groundTiles.push(tile);
-  }
-  ensureNeighbourhoodWideGroundPhysics();
+  buildRooftopBuildingPool();
+  buildSkylinePool();
 }
 
-function ensureNeighbourhoodWideGroundPhysics() {
-  if (neighbourhoodWideGroundBody || !world) return;
-  const halfXZ = 560;
+/** No-op shim — rooftop buildings handle their own physics. */
+function ensureNeighbourhoodWideGroundPhysics() {}
+
+/** No-op shim — rooftop deck is built into each platform group. */
+function ensureVisibleRunwayPlane() {}
+
+/** No-op shim. */
+function syncVisibleRunwayPlane() {}
+
+/** Delegate to rooftop recycle system. */
+function recycleGroundTiles() {
+  recycleRooftopBuildings();
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  ROOFTOP BUILDING SYSTEM — procedural, no external GLB required
+// ═══════════════════════════════════════════════════════════════════
+
+/** Dark gravel material for the rooftop surface the player runs on. */
+function makeRooftopSurfaceMaterial() {
+  return new THREE.MeshStandardMaterial({
+    color: ROOFTOP_SURFACE_COLOR,
+    roughness: 0.94,
+    metalness: 0.04,
+  });
+}
+
+/** Brick facade material — tall building sides. */
+function makeFacadeMaterial(seed = 0) {
+  const col = seed % 2 === 0 ? BUILDING_FACADE_A : BUILDING_FACADE_B;
+  return new THREE.MeshStandardMaterial({
+    color: col,
+    roughness: 0.88,
+    metalness: 0.05,
+  });
+}
+
+/** Dark window strip material. */
+function makeWindowMaterial() {
+  return new THREE.MeshStandardMaterial({
+    color: 0x1a2a3a,
+    roughness: 0.3,
+    metalness: 0.6,
+  });
+}
+
+/**
+ * Build one rooftop building platform and return { group, body }.
+ *  - A flat gravel rooftop (visual + physics collider exactly at RUNWAY_SURFACE_Y)
+ *  - Tall brick facade below (visual only)
+ *  - Window strips on the facade
+ *  - Small rooftop ledge walls on left/right edges
+ */
+function buildRooftopPlatform(seed = 0) {
+  const group = new THREE.Group();
+  const W = BUILDING_WIDTH;
+  const D = BUILDING_DEPTH;
+  const fH = BUILDING_FACADE_HEIGHT;
+  const roofThick = 0.28;
+
+  // --- Gravel rooftop deck (visual) ---
+  const roofGeo = new THREE.BoxGeometry(W, roofThick, D);
+  const roofMat = makeRooftopSurfaceMaterial();
+  const roofMesh = new THREE.Mesh(roofGeo, roofMat);
+  // Top surface sits exactly at RUNWAY_SURFACE_Y
+  roofMesh.position.y = RUNWAY_SURFACE_Y - roofThick * 0.5;
+  roofMesh.receiveShadow = true;
+  group.add(roofMesh);
+
+  // --- Facade (tall box below the deck) ---
+  const facadeGeo = new THREE.BoxGeometry(W, fH, D);
+  const facadeMat = makeFacadeMaterial(seed);
+  const facadeMesh = new THREE.Mesh(facadeGeo, facadeMat);
+  facadeMesh.position.y = RUNWAY_SURFACE_Y - roofThick - fH * 0.5;
+  facadeMesh.receiveShadow = true;
+  facadeMesh.castShadow = true;
+  group.add(facadeMesh);
+
+  // --- Window strips (front + back faces) ---
+  const winW = W * 0.72;
+  const winH = fH * 0.28;
+  const winD = 0.22;
+  const winMat = makeWindowMaterial();
+  const numWinRows = 3;
+  for (let row = 0; row < numWinRows; row++) {
+    const yOff = RUNWAY_SURFACE_Y - roofThick - fH * 0.18 - row * (fH * 0.26);
+    const winGeo = new THREE.BoxGeometry(winW, winH, winD);
+    // Front face
+    const winFront = new THREE.Mesh(winGeo, winMat);
+    winFront.position.set(0, yOff, D * 0.5 + 0.01);
+    group.add(winFront);
+    // Back face
+    const winBack = new THREE.Mesh(winGeo.clone(), winMat);
+    winBack.position.set(0, yOff, -D * 0.5 - 0.01);
+    group.add(winBack);
+  }
+
+  // --- Low ledge walls on left and right edges (visual) ---
+  const ledgeH = 0.45;
+  const ledgeW = 0.22;
+  const ledgeMat = new THREE.MeshStandardMaterial({ color: 0x555860, roughness: 0.9, metalness: 0.1 });
+  for (const side of [-1, 1]) {
+    const ledgeGeo = new THREE.BoxGeometry(ledgeW, ledgeH, D);
+    const ledge = new THREE.Mesh(ledgeGeo, ledgeMat);
+    ledge.position.set(side * (W * 0.5 + ledgeW * 0.5), RUNWAY_SURFACE_Y + ledgeH * 0.5, 0);
+    ledge.castShadow = true;
+    group.add(ledge);
+  }
+
+  // --- Physics body: one flat slab at the rooftop surface ---
   const body = new CANNON.Body({ mass: 0, material: groundPhysicsMaterial });
-  body.addShape(new CANNON.Box(new CANNON.Vec3(halfXZ, 0.16, halfXZ)));
-  body.position.set(0, 0.14, RUN_START_Z + 240);
-  body.userData = { type: "neighbourhoodWideGround" };
+  body.addShape(new CANNON.Box(new CANNON.Vec3(W * 0.5, roofThick * 0.5, D * 0.5)));
+  body.position.set(0, RUNWAY_SURFACE_Y - roofThick * 0.5, 0);
+  body.userData = { type: "groundTile" };
   world.addBody(body);
-  neighbourhoodWideGroundBody = body;
-  for (const tile of groundTiles) {
-    const b = tile.userData?.body;
-    if (b) b.position.y = -140;
+
+  return { group, body };
+}
+
+/**
+ * Build a decorative background skyline building (no physics, just visual depth).
+ * Heights/widths are randomised per seed.
+ */
+function buildSkylineBuilding(seed) {
+  const rng2 = mulberry32(seed * 7919 + 13);
+  const W = 6 + rng2() * 10;
+  const H = 28 + rng2() * 36;
+  const D = 8 + rng2() * 12;
+  const col = [0x4a3830, 0x3a4450, 0x504840, 0x384858][seed % 4];
+  const geo = new THREE.BoxGeometry(W, H, D);
+  const mat = new THREE.MeshStandardMaterial({ color: col, roughness: 0.9, metalness: 0.08 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  return mesh;
+}
+
+/** Place/replace the rooftop building pool in the scene. Called once on init. */
+function buildRooftopBuildingPool() {
+  // Clear any existing
+  rooftopBuildings.forEach(({ group, body }) => {
+    scene.remove(group);
+    world.removeBody(body);
+  });
+  rooftopBuildings = [];
+
+  for (let i = 0; i < BUILDING_POOL; i++) {
+    const { group, body } = buildRooftopPlatform(i);
+    scene.add(group);
+    rooftopBuildings.push({ group, body, index: i });
   }
 }
 
-/** Sunset sky image (or gradient fallback) + no fog so the city backdrop stays visible. */
+/** Place/replace the decorative skyline. Called once on init. */
+function buildSkylinePool() {
+  skylineBuildings.forEach(m => scene.remove(m));
+  skylineBuildings = [];
+  const count = 32;
+  for (let i = 0; i < count; i++) {
+    const mesh = buildSkylineBuilding(i);
+    scene.add(mesh);
+    skylineBuildings.push(mesh);
+  }
+}
+
+/**
+ * Recycle rooftop platforms around the player every frame.
+ * Each platform covers BUILDING_DEPTH m, gap is BUILDING_GAP m.
+ */
+function recycleRooftopBuildings() {
+  if (!playerBody || rooftopBuildings.length === 0) return;
+  const pz = playerBody.position.z;
+
+  // Spread buildings starting some tiles behind the player
+  const firstTileZ = Math.floor((pz - BUILDING_CYCLE * 2) / BUILDING_CYCLE) * BUILDING_CYCLE;
+
+  rooftopBuildings.forEach(({ group, body }, i) => {
+    const centerZ = firstTileZ + i * BUILDING_CYCLE + BUILDING_DEPTH * 0.5;
+
+    group.position.set(0, 0, centerZ);
+    body.position.set(0, RUNWAY_SURFACE_Y - 0.14, centerZ);
+    body.velocity.set(0, 0, 0);
+    body.angularVelocity.set(0, 0, 0);
+    body.wakeUp();
+  });
+
+  // Reposition skyline buildings in two parallel rows behind the run
+  skylineBuildings.forEach((mesh, i) => {
+    const half = Math.floor(skylineBuildings.length / 2);
+    const side = i < half ? -1 : 1;
+    const idx = i < half ? i : i - half;
+    const zBase = Math.floor((pz - BUILDING_CYCLE * 3) / BUILDING_CYCLE) * BUILDING_CYCLE;
+    const z = zBase + idx * BUILDING_CYCLE;
+    const xOff = side * (BUILDING_WIDTH * 0.5 + SKYLINE_DEPTH * 0.5 + (Math.abs(Math.sin(i * 2.3)) * 8));
+    const hOff = 8 + Math.abs(Math.sin(i * 1.7)) * 18;
+    mesh.position.set(xOff, RUNWAY_SURFACE_Y - mesh.geometry.parameters.height * 0.5 + hOff, z);
+  });
+}
+
+/**
+ * Returns true if the world Z sits inside a building gap (no floor).
+ * The gap is the BUILDING_GAP metres immediately after each platform.
+ */
+function isRooftopGap(worldZ) {
+  if (!ENABLE_GAPS) return false;
+  // Scripted level-1 end gap always wins
+  const distFromLevelGap = Math.abs(worldZ - LEVEL1_GAP_TILE_CENTER_Z);
+  if (distFromLevelGap < BUILDING_GAP * 0.5) return true;
+  // Don't put procedural gaps past the finish ribbon
+  if (worldZ >= FINISH_RIBBON_Z - BUILDING_CYCLE) return false;
+  const posInCycle = ((worldZ % BUILDING_CYCLE) + BUILDING_CYCLE) % BUILDING_CYCLE;
+  return posInCycle >= BUILDING_DEPTH;
+}
+
 function applyRunSceneBackdrop() {
   if (!scene || !renderer) return;
   scene.background = getSunsetSkyBackgroundTexture();
@@ -2813,744 +2841,34 @@ function applyRunSceneBackdrop() {
   renderer.setClearColor(SUNSET_SKY_HORIZON, 1);
 }
 
-/** Main menu / leave run — same backdrop; neighbourhood stays visible. */
 function restoreRooftopPresentation() {
   runSegment = "rooftop";
   if (world) world.gravity.set(0, -32, 0);
   applyRunSceneBackdrop();
-  if (neighbourhoodWorldGroup) neighbourhoodWorldGroup.visible = true;
 }
 
-/** Start-of-run — same backdrop; neighbourhood already visible. */
 function applyNeighbourhoodRunStartState() {
   runSegment = "rooftop";
   if (world) world.gravity.set(0, -32, 0);
   applyRunSceneBackdrop();
-  if (neighbourhoodWorldGroup) neighbourhoodWorldGroup.visible = true;
 }
 
 function getActiveRunSurfaceY() {
   return RUNWAY_SURFACE_Y;
 }
 
-async function tryLoadRunwayAsphaltOnce() {
-  if (runwayAsphaltTex) return;
-  try {
-    const t = await new THREE.TextureLoader().loadAsync(RUNWAY_ASPHALT_MAP);
-    t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    t.colorSpace = THREE.SRGBColorSpace;
-    t.anisotropy = Math.min(8, renderer?.capabilities?.getMaxAnisotropy?.() ?? 4);
-    runwayAsphaltTex = t;
-  } catch (err) {
-    console.warn("[Runway] Asphalt texture failed", err);
-  }
-}
-
-async function tryLoadNeighbourhoodBrickOnce() {
-  if (neighbourhoodBrickTex) return;
-  try {
-    const t = await new THREE.TextureLoader().loadAsync(NEIGHBOURHOOD_BRICK_MAP);
-    t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    t.colorSpace = THREE.SRGBColorSpace;
-    t.anisotropy = Math.min(8, renderer?.capabilities?.getMaxAnisotropy?.() ?? 4);
-    neighbourhoodBrickTex = t;
-  } catch (err) {
-    console.warn("[World] Brick texture failed", err);
-  }
-}
-
-/** Asphalt + brick — call before neighbourhood build or runway deck. */
-async function tryLoadNeighbourhoodSurfaceTexturesOnce() {
-  await Promise.all([
-    tryLoadRunwayAsphaltOnce(),
-    tryLoadNeighbourhoodBrickOnce(),
-    tryLoadSkyBackgroundOnce(),
-  ]);
-}
-
-/** Paint every vertex on a geometry one sRGB color (visible with `vertexColors: true`). */
-function paintMeshVertexColors(geometry, colorHex) {
-  if (!geometry?.attributes?.position) return;
-  const count = geometry.attributes.position.count;
-  const c = new THREE.Color(colorHex);
-  const colors = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) c.toArray(colors, i * 3);
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-}
-
-const _bldPatA = new THREE.Color();
-const _bldPatB = new THREE.Color();
-const _bldPatC = new THREE.Color();
-const _bldPatOut = new THREE.Color();
-const _BUILDING_BROWNS = [
-  NEIGHBOURHOOD_BUILDING_BROWN_A,
-  NEIGHBOURHOOD_BUILDING_BROWN_B,
-  0x9a7460,
-  0x806048,
-  0xa88872,
-];
-
-function neighbourhoodMeshSeed(meshKey = "") {
-  let h = 0;
-  for (let i = 0; i < meshKey.length; i++) h = (h + meshKey.charCodeAt(i) * 17) | 0;
-  return Math.abs(h);
-}
-
-/**
- * Realistic brown facade — soft mortar lines, varied brick tones, height + noise (vertex colors).
- * @param {THREE.BufferGeometry} geometry
- * @param {string} [meshKey]
- */
-function paintNeighbourhoodBuildingVertexPattern(geometry, meshKey = "") {
-  const pos = geometry.attributes.position;
-  if (!pos) return;
-  _bldPatA.setHex(NEIGHBOURHOOD_BUILDING_MORTAR);
-  const course = 1 / Math.max(NEIGHBOURHOOD_BRICK_METERS_V, 0.08);
-  const stretch = 1 / Math.max(NEIGHBOURHOOD_BRICK_METERS_U, 0.08);
-  const seed = neighbourhoodMeshSeed(meshKey);
-  const phaseX = (seed % 997) * 0.0021;
-  const phaseZ = ((seed >> 5) % 991) * 0.0023;
-  if (!geometry.boundingBox) geometry.computeBoundingBox();
-  const yLo = geometry.boundingBox?.min.y ?? 0;
-  const yHi = geometry.boundingBox?.max.y ?? 12;
-  const ySpan = Math.max(yHi - yLo, 1);
-  const count = pos.count;
-  const colors = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    const x = pos.getX(i);
-    const y = pos.getY(i);
-    const z = pos.getZ(i);
-    const u = (x + phaseX) * stretch;
-    const v = y * course;
-    const row = Math.floor(v);
-    const col = Math.floor(u + Math.floor((z + phaseZ) * stretch * 0.35));
-    const fu = u - Math.floor(u);
-    const fv = v - Math.floor(v);
-    const isMortar = fv < 0.038 || fu < 0.032;
-    if (isMortar) {
-      _bldPatOut.copy(_bldPatA);
-    } else {
-      const pick = _BUILDING_BROWNS[(row * 5 + col * 11 + seed) % _BUILDING_BROWNS.length];
-      _bldPatOut.setHex(pick);
-      const heightT = (y - yLo) / ySpan;
-      _bldPatOut.offsetHSL(0, 0, heightT * 0.05 - 0.02);
-      _bldPatOut.offsetHSL(0, -0.01, Math.sin(x * 19.3 + y * 11.7 + z * 13.1) * 0.028);
-    }
-    _bldPatOut.toArray(colors, i * 3);
-  }
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-}
-
-const _leafA = new THREE.Color();
-const _leafB = new THREE.Color();
-const _leafOut = new THREE.Color();
-
-/** Green canopy with natural variation (vertex colors). */
-function paintNeighbourhoodTreeFoliageVertexPattern(geometry, meshKey = "") {
-  const pos = geometry.attributes.position;
-  if (!pos) return;
-  _leafA.setHex(NEIGHBOURHOOD_LEAF_A);
-  _leafB.setHex(NEIGHBOURHOOD_LEAF_B);
-  const seed = neighbourhoodMeshSeed(meshKey);
-  const count = pos.count;
-  const colors = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    const x = pos.getX(i);
-    const y = pos.getY(i);
-    const z = pos.getZ(i);
-    _leafOut.copy((Math.floor(x * 3.1 + z * 2.7 + seed) % 2) === 0 ? _leafA : _leafB);
-    _leafOut.offsetHSL(0.02, 0.05, Math.sin(x * 22.1 + y * 9.3 + z * 17.5) * 0.06);
-    _leafOut.toArray(colors, i * 3);
-  }
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-}
-
-const _barkA = new THREE.Color();
-const _barkB = new THREE.Color();
-const _barkOut = new THREE.Color();
-
-/** Brown trunk / branch bark (vertex colors). */
-function paintNeighbourhoodTreeBarkVertexPattern(geometry, meshKey = "") {
-  const pos = geometry.attributes.position;
-  if (!pos) return;
-  _barkA.setHex(NEIGHBOURHOOD_BARK_A);
-  _barkB.setHex(NEIGHBOURHOOD_BARK_B);
-  const seed = neighbourhoodMeshSeed(meshKey);
-  const count = pos.count;
-  const colors = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    const x = pos.getX(i);
-    const y = pos.getY(i);
-    const z = pos.getZ(i);
-    const strip = Math.floor(y * 4.2 + seed * 0.001) % 2;
-    _barkOut.copy(strip === 0 ? _barkA : _barkB);
-    _barkOut.offsetHSL(0, 0, Math.sin(x * 14.3 + z * 11.9) * 0.05);
-    _barkOut.toArray(colors, i * 3);
-  }
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-}
-
-const _brickUvPos = new THREE.Vector3();
-const _brickUvNormal = new THREE.Vector3();
-
-/**
- * Local-space triplanar UVs — tiles {@link NEIGHBOURHOOD_BRICK_MAP} on every wall face.
- * @param {THREE.BufferGeometry} geometry
- */
-function assignNeighbourhoodBoxUvs(geometry) {
-  const pos = geometry.attributes.position;
-  let normal = geometry.attributes.normal;
-  if (!pos) return;
-  if (!normal) {
-    geometry.computeVertexNormals();
-    normal = geometry.attributes.normal;
-  }
-  const tileU = 1 / Math.max(NEIGHBOURHOOD_BRICK_METERS_U, 0.08);
-  const tileV = 1 / Math.max(NEIGHBOURHOOD_BRICK_METERS_V, 0.08);
-  const uv = new Float32Array(pos.count * 2);
-  for (let i = 0; i < pos.count; i++) {
-    _brickUvPos.fromBufferAttribute(pos, i);
-    _brickUvNormal.fromBufferAttribute(normal, i);
-    const ax = Math.abs(_brickUvNormal.x);
-    const ay = Math.abs(_brickUvNormal.y);
-    const az = Math.abs(_brickUvNormal.z);
-    let u;
-    let v;
-    if (ax >= ay && ax >= az) {
-      u = _brickUvPos.z * tileU;
-      v = _brickUvPos.y * tileV;
-    } else if (ay >= ax && ay >= az) {
-      u = _brickUvPos.x * tileU;
-      v = _brickUvPos.z * tileV;
-    } else {
-      u = _brickUvPos.x * tileU;
-      v = _brickUvPos.y * tileV;
-    }
-    uv[i * 2] = u;
-    uv[i * 2 + 1] = v;
-  }
-  geometry.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
-  const uvAttr = geometry.attributes.uv;
-  if (uvAttr) uvAttr.needsUpdate = true;
-}
-
-/** Textured or flat asphalt for streets + runway deck (uses per-mesh vertex grey). */
-function makeNeighbourhoodAsphaltMaterial(repeatU, repeatV) {
-  const base = {
-    vertexColors: true,
-    color: 0xffffff,
-    roughness: 0.96,
-    metalness: 0.02,
-    emissive: new THREE.Color(0x222428),
-    emissiveIntensity: 0.1,
-    side: THREE.DoubleSide,
-    depthWrite: true,
-    depthTest: true,
-  };
-  if (runwayAsphaltTex) {
-    const map = runwayAsphaltTex.clone();
-    map.wrapS = map.wrapT = THREE.RepeatWrapping;
-    map.repeat.set(repeatU, repeatV);
-    map.colorSpace = THREE.SRGBColorSpace;
-    return new THREE.MeshStandardMaterial({ ...base, map, color: NEIGHBOURHOOD_ASPHALT_TINT });
-  }
-  return new THREE.MeshStandardMaterial({ ...base, color: NEIGHBOURHOOD_ASPHALT_COLOR });
-}
-
-/** Tiled brick on building walls — `tint` multiplies the map toward brown. */
-function makeNeighbourhoodBrickMaterial(tint = NEIGHBOURHOOD_BRICK_TINT_A) {
-  const base = {
-    color: tint,
-    roughness: 0.9,
-    metalness: 0.02,
-    emissive: new THREE.Color(0x6a4a38),
-    emissiveIntensity: 0.1,
-    side: THREE.DoubleSide,
-    depthWrite: true,
-    depthTest: true,
-  };
-  if (neighbourhoodBrickTex) {
-    const map = neighbourhoodBrickTex.clone();
-    map.wrapS = map.wrapT = THREE.RepeatWrapping;
-    map.repeat.set(1, 1);
-    map.colorSpace = THREE.SRGBColorSpace;
-    map.anisotropy = Math.min(12, renderer?.capabilities?.getMaxAnisotropy?.() ?? 4);
-    return new THREE.MeshStandardMaterial({ ...base, map });
-  }
-  return new THREE.MeshStandardMaterial({
-    ...base,
-    color: tint,
-  });
-}
-
-/** Brown facade — uses geometry `color` from {@link paintNeighbourhoodBuildingVertexPattern}. */
-function makeNeighbourhoodBuildingVertexMaterial() {
-  return new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    color: 0xffffff,
-    roughness: 0.92,
-    metalness: 0.02,
-    emissive: new THREE.Color(0x3d2e24),
-    emissiveIntensity: 0.04,
-    side: THREE.DoubleSide,
-    depthWrite: true,
-    depthTest: true,
-  });
-}
-
-function makeNeighbourhoodTreeFoliageMaterial() {
-  return new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    color: 0xffffff,
-    roughness: 0.88,
-    metalness: 0.02,
-    emissive: new THREE.Color(0x1a3018),
-    emissiveIntensity: 0.05,
-    side: THREE.DoubleSide,
-    depthWrite: true,
-    depthTest: true,
-  });
-}
-
-/** Tree bark — vertex color from {@link paintNeighbourhoodTreeBarkVertexPattern}. */
-function makeNeighbourhoodTreeBarkMaterial() {
-  return new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    color: 0xffffff,
-    roughness: 0.95,
-    metalness: 0.01,
-    emissive: new THREE.Color(0x000000),
-    emissiveIntensity: 0,
-    side: THREE.DoubleSide,
-    depthWrite: true,
-    depthTest: true,
-  });
-}
-
-function makeNeighbourhoodVertexMaterial(roughness = 0.9, metalness = 0.03) {
-  return new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    color: 0xffffff,
-    roughness,
-    metalness,
-    emissive: new THREE.Color(0x000000),
-    emissiveIntensity: 0,
-    side: THREE.DoubleSide,
-    depthWrite: true,
-    depthTest: true,
-  });
-}
-
-/** Wide grey plane under the run — follows the player in +Z (physics slabs have no render mesh). */
-function ensureVisibleRunwayPlane() {
-  if (visibleRunwayPlane || !scene) return;
-  const geo = new THREE.PlaneGeometry(80, 520);
-  geo.rotateX(-Math.PI / 2);
-  paintMeshVertexColors(geo, NEIGHBOURHOOD_ASPHALT_VERTEX);
-  const mat = makeNeighbourhoodAsphaltMaterial(22, 145);
-  visibleRunwayPlane = new THREE.Mesh(geo, mat);
-  visibleRunwayPlane.receiveShadow = true;
-  visibleRunwayPlane.name = "visibleRunwayDeck";
-  scene.add(visibleRunwayPlane);
-  syncVisibleRunwayPlane();
-}
-
-function syncVisibleRunwayPlane() {
-  if (!visibleRunwayPlane || !playerBody) return;
-  visibleRunwayPlane.position.set(playerBody.position.x, RUNWAY_SURFACE_Y - 0.04, playerBody.position.z);
-  visibleRunwayPlane.rotation.set(0, worldRunYaw, 0);
-}
-
-function recycleGroundTiles() {
-  if (neighbourhoodWideGroundBody) return;
-  const pz = playerBody.position.z;
-  const start = Math.floor((pz - 30) / TILE_Z) * TILE_Z;
-  groundTiles.forEach((tile, i) => {
-    const base = start + i * TILE_Z;
-    const gap = isGapSegment(base);
-    tile.position.x = 0;
-    tile.position.y = 0;
-    tile.position.z = base;
-    const body = tile.userData?.body;
-    if (body) {
-      body.position.x = 0;
-      body.position.y = gap ? -40 : 0.14;
-      body.position.z = base;
-      body.velocity.set(0, 0, 0);
-      body.angularVelocity.set(0, 0, 0);
-    }
-  });
-}
-
-/**
- * Scale / place the imported neighbourhood along the forward run in local +Z (0 … `targetLength`).
- * Assumes Y-up GLB; may yaw 90° if the asset’s long axis is X.
- * @param {THREE.Object3D} root
- */
-function fitNeighbourhoodToAlley(root, targetWidth, targetLength) {
-  root.position.set(0, 0, 0);
-  root.rotation.set(0, 0, 0);
-  root.scale.set(1, 1, 1);
-  root.updateMatrixWorld(true);
-  let box = new THREE.Box3().setFromObject(root);
-  let size = box.getSize(new THREE.Vector3());
-  if (size.x > size.z * 1.2) {
-    root.rotation.y = Math.PI / 2;
-    root.updateMatrixWorld(true);
-    box.setFromObject(root);
-    size = box.getSize(new THREE.Vector3());
-  }
-  const sx = targetWidth / Math.max(size.x, 1e-4);
-  const sz = targetLength / Math.max(size.z, 1e-4);
-  const s = Math.min(sx, sz) * NEIGHBOURHOOD_SCALE_BOOST;
-  root.scale.setScalar(s);
-  root.updateMatrixWorld(true);
-  box.setFromObject(root);
-  root.position.set(0, 0, 0);
-  root.position.y = -box.min.y;
-  root.position.x = -((box.min.x + box.max.x) * 0.5);
-  root.position.z = -box.min.z;
-  root.updateMatrixWorld(true);
-}
-
-/** Mesh / material / ancestor names that usually mean glazing in modular city kits. */
-const NEIGHBOURHOOD_WINDOW_NAME_RE =
-  /window|glass|glaz|pane|curtain|storefront|fenestr|skylight|vitro|disp(win|lay)|_win|win_|facade_glass/i;
-
-/** Traffic / vehicles / street hardware — keep off brick palette (not root `Sketchfab_model`). */
-const NEIGHBOURHOOD_PROP_NAME_RE =
-  /(^|[^A-Za-z0-9])(SM_|_gltfNode_)|traffic|barricade|barrier|cone|delineator|bmw|streetlight|solar|sketchfab_model\.0\d\d|split_ac|acer_|_lod2_|pot_\d/i;
-
-/** Tree canopy (Acer cluster mats, etc.) — not bark or street hardware. */
-const NEIGHBOURHOOD_FOLIAGE_NAME_RE = /acer_|foliage|cluster_mat|pot_\d/i;
-/** Trunk / branch bark on street trees. */
-const NEIGHBOURHOOD_TREE_BARK_NAME_RE = /\bbark\b|bark_mat/i;
-
-/** Facade masonry from modular `Wall_*` nodes. */
-const NEIGHBOURHOOD_WALL_NAME_RE = /\bwall\b|wall_\d|wall\./i;
-/** Street hardware / cars / junk — hidden (huge grey meshes in the modular GLB). */
-const NEIGHBOURHOOD_HIDDEN_NAME_RE =
-  /streetlight|largelight|lightcolors|solarpanel|solar|barricade|traffic|bmw|sketchfab_model\.\d|sm_light|sm_barricade|sm_delineator|delineator|cone|barrier|verticade|split_ac|pot_\d|acer_|_lod2_|_gltfnode_/i;
-/** Hide non-building meshes larger than this (world m) after city scale. */
-const NEIGHBOURHOOD_HIDE_MESH_OVER_M = 38;
-
-function collectNeighbourhoodMeshMaterialNames(mesh) {
-  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-  const names = [];
-  for (let i = 0; i < mats.length; i++) {
-    const m = mats[i];
-    if (m && m.name) names.push(String(m.name));
-  }
-  return names.join(" ");
-}
-
-/** GLB node names are often on parents; mesh names stay `Object_N`. */
-function collectNeighbourhoodAncestorNames(mesh, maxDepth = 14) {
-  const names = [];
-  let p = mesh.parent;
-  let d = 0;
-  while (p && d < maxDepth) {
-    if (p.name) names.push(p.name);
-    p = p.parent;
-    d += 1;
-  }
-  return names.join(" ");
-}
-
-function neighbourhoodNameBlob(mesh) {
-  return `${mesh.name} ${collectNeighbourhoodAncestorNames(mesh)} ${collectNeighbourhoodMeshMaterialNames(
-    mesh
-  )}`;
-}
-
-function isNeighbourhoodWindowMesh(mesh) {
-  return NEIGHBOURHOOD_WINDOW_NAME_RE.test(neighbourhoodNameBlob(mesh));
-}
-
-function isNeighbourhoodStreetPropMesh(mesh) {
-  const blob = neighbourhoodNameBlob(mesh);
-  if (isNeighbourhoodTreeBarkMesh(mesh) || isNeighbourhoodTreeFoliageMesh(mesh)) return false;
-  if (NEIGHBOURHOOD_PROP_NAME_RE.test(blob)) return true;
-  if (/streetlight/i.test(collectNeighbourhoodMeshMaterialNames(mesh))) return true;
-  return false;
-}
-
-function isNeighbourhoodTreeBarkMesh(mesh) {
-  return NEIGHBOURHOOD_TREE_BARK_NAME_RE.test(neighbourhoodNameBlob(mesh));
-}
-
-function isNeighbourhoodTreeFoliageMesh(mesh) {
-  if (isNeighbourhoodTreeBarkMesh(mesh)) return false;
-  return NEIGHBOURHOOD_FOLIAGE_NAME_RE.test(neighbourhoodNameBlob(mesh));
-}
-
-/** @deprecated Use {@link isNeighbourhoodTreeFoliageMesh}. */
-function isNeighbourhoodFoliageMesh(mesh) {
-  return isNeighbourhoodTreeFoliageMesh(mesh);
-}
-
-function isNeighbourhoodWallMesh(mesh) {
-  return NEIGHBOURHOOD_WALL_NAME_RE.test(neighbourhoodNameBlob(mesh));
-}
-
-function isNeighbourhoodHiddenMesh(mesh) {
-  return NEIGHBOURHOOD_HIDDEN_NAME_RE.test(neighbourhoodNameBlob(mesh));
-}
-
-function isNeighbourhoodOversizedMesh(mesh) {
-  if (!mesh.isMesh && !mesh.isInstancedMesh) return false;
-  const box = new THREE.Box3().setFromObject(mesh);
-  if (box.isEmpty()) return false;
-  const size = box.getSize(new THREE.Vector3());
-  return Math.max(size.x, size.y, size.z) > NEIGHBOURHOOD_HIDE_MESH_OVER_M;
-}
-
-/** Drop street-light shells and other oversized grey props from the modular city kit. */
-function shouldHideNeighbourhoodMesh(mesh) {
-  if (isNeighbourhoodHiddenMesh(mesh)) return true;
-  if (isNeighbourhoodRoadLikeMesh(mesh)) return false;
-  if (isNeighbourhoodWindowMesh(mesh)) return false;
-  if (isNeighbourhoodWallMesh(mesh)) return false;
-  if (isNeighbourhoodTreeBarkMesh(mesh)) return false;
-  if (isNeighbourhoodTreeFoliageMesh(mesh)) return false;
-  if (isNeighbourhoodBuildingMesh(mesh)) return false;
-  if (isNeighbourhoodOversizedMesh(mesh)) return true;
-  return false;
-}
-
-/** Road / track meshes: used to center the scene on the run axis and match run surface height. */
-function isNeighbourhoodRoadLikeMesh(mesh) {
-  return /road|street|asphalt|pavement|racetrack|track|lane|tarmac|highway|boulevard|modular_road|drivable|grid|route|piste|circuit|terrain|sol\b|rue|drive|parking|sidewalk|curb/i.test(
-    neighbourhoodNameBlob(mesh)
-  );
-}
-
-/** Shift `root` in X so detected road geometry is centered on world X = 0 (player run strip). */
-function offsetNeighbourhoodSoRoadCentersOnRunAxis(root) {
-  root.updateMatrixWorld(true);
-  const union = new THREE.Box3();
-  let hit = false;
-  root.traverse((o) => {
-    if (!o.isMesh && !o.isInstancedMesh) return;
-    if (!isNeighbourhoodRoadLikeMesh(o)) return;
-    const b = new THREE.Box3().setFromObject(o);
-    if (b.isEmpty()) return;
-    if (!hit) {
-      union.copy(b);
-      hit = true;
-    } else union.union(b);
-  });
-  if (!hit) return;
-  const cx = (union.min.x + union.max.x) * 0.5;
-  root.position.x -= cx;
-  root.updateMatrixWorld(true);
-}
-
-/**
- * Move `hood` vertically so the top of road-like geometry lines up with {@link RUNWAY_SURFACE_Y}
- * (player feet / physics deck).
- */
-function alignNeighbourhoodRoadTopToRunSurfaceY(hoodParent, hood) {
-  hoodParent.updateMatrixWorld(true);
-  const union = new THREE.Box3();
-  let hit = false;
-  hood.traverse((o) => {
-    if (!o.isMesh && !o.isInstancedMesh) return;
-    if (!isNeighbourhoodRoadLikeMesh(o)) return;
-    const b = new THREE.Box3().setFromObject(o);
-    if (b.isEmpty()) return;
-    if (!hit) {
-      union.copy(b);
-      hit = true;
-    } else union.union(b);
-  });
-  if (!hit) return;
-  const dy = RUNWAY_SURFACE_Y - union.max.y;
-  hood.position.y += dy;
-  hoodParent.updateMatrixWorld(true);
-}
-
-/** FNV-1a–style bucket for stable red vs tan per mesh. */
-function neighbourhoodBrickBucket(meshId) {
-  let h = 2166136261;
-  for (let i = 0; i < meshId.length; i++) {
-    h ^= meshId.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return Math.abs(h) % 2;
-}
-
-/**
- * Vertex-painted neighbourhood: brown building facades, dark grey roads, green trees.
- */
-function isNeighbourhoodBuildingMesh(mesh) {
-  if (isNeighbourhoodRoadLikeMesh(mesh)) return false;
-  if (isNeighbourhoodWindowMesh(mesh)) return false;
-  if (isNeighbourhoodTreeBarkMesh(mesh)) return false;
-  if (isNeighbourhoodTreeFoliageMesh(mesh)) return false;
-  if (isNeighbourhoodStreetPropMesh(mesh)) return false;
-  if (isNeighbourhoodHiddenMesh(mesh)) return false;
-  if (isNeighbourhoodWallMesh(mesh)) return true;
-  return true;
-}
-
-function applyNeighbourhoodBuildingMaterials(root) {
-  const matBuilding = makeNeighbourhoodBuildingVertexMaterial();
-  const matCityGround = makeNeighbourhoodVertexMaterial(0.93, 0.02);
-  const matTreeLeaf = makeNeighbourhoodTreeFoliageMaterial();
-  const matTreeBark = makeNeighbourhoodTreeBarkMaterial();
-  const matProp = makeNeighbourhoodVertexMaterial(0.88, 0.1);
-  root.updateMatrixWorld(true);
-  root.traverse((obj) => {
-    if (!obj.isMesh && !obj.isInstancedMesh) return;
-    if (shouldHideNeighbourhoodMesh(obj)) {
-      obj.visible = false;
-      return;
-    }
-    const geo = obj.geometry;
-    if (!geo) return;
-    if (!geo.attributes.normal) geo.computeVertexNormals();
-
-    let mat;
-    if (isNeighbourhoodRoadLikeMesh(obj)) {
-      paintMeshVertexColors(geo, NEIGHBOURHOOD_CITY_GROUND_BROWN_VERTEX);
-      mat = matCityGround;
-    } else if (isNeighbourhoodTreeBarkMesh(obj)) {
-      paintNeighbourhoodTreeBarkVertexPattern(geo, obj.uuid);
-      mat = matTreeBark;
-    } else if (isNeighbourhoodTreeFoliageMesh(obj)) {
-      paintNeighbourhoodTreeFoliageVertexPattern(geo, obj.uuid);
-      mat = matTreeLeaf;
-    } else if (isNeighbourhoodStreetPropMesh(obj)) {
-      paintMeshVertexColors(geo, NEIGHBOURHOOD_PROP_VERTEX);
-      mat = matProp;
-    } else if (isNeighbourhoodBuildingMesh(obj) || isNeighbourhoodWindowMesh(obj)) {
-      paintNeighbourhoodBuildingVertexPattern(geo, obj.uuid);
-      mat = matBuilding;
-    } else {
-      paintNeighbourhoodBuildingVertexPattern(geo, obj.uuid);
-      mat = matBuilding;
-    }
-    obj.material = mat;
-    obj.castShadow = true;
-    obj.receiveShadow = true;
-    obj.frustumCulled = false;
-  });
-}
-
-/** If the GLB has no meshes (load fail / empty), add a simple strip so the run is never “void purple”. */
-function addNeighbourhoodFallbackStrip(parent) {
-  const matFloor = makeNeighbourhoodAsphaltMaterial(24, 90);
-  const matWall = makeNeighbourhoodBuildingVertexMaterial();
-  const len = NEIGHBOURHOOD_RUN_LENGTH;
-  const halfW = Math.max(18, NEIGHBOURHOOD_RUN_WIDTH * 0.45);
-  const floorGeo = new THREE.PlaneGeometry(halfW * 2 + 20, len);
-  paintMeshVertexColors(floorGeo, NEIGHBOURHOOD_ASPHALT_VERTEX);
-  const floor = new THREE.Mesh(floorGeo, matFloor);
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.set(0, 0.02, len * 0.5);
-  floor.name = "neighbourhoodFallbackFloor";
-  parent.add(floor);
-  const wallH = 32;
-  const wallD = len * 0.95;
-  const wallGeoL = new THREE.BoxGeometry(5, wallH, wallD);
-  paintNeighbourhoodBuildingVertexPattern(wallGeoL, "fallbackL");
-  const left = new THREE.Mesh(wallGeoL, matWall);
-  left.position.set(-(halfW + 3.5), wallH * 0.5, len * 0.5);
-  left.name = "neighbourhoodFallbackWallL";
-  parent.add(left);
-  const wallGeoR = new THREE.BoxGeometry(5, wallH, wallD);
-  paintNeighbourhoodBuildingVertexPattern(wallGeoR, "fallbackR");
-  const right = new THREE.Mesh(wallGeoR, matWall);
-  right.position.set(halfW + 3.5, wallH * 0.5, len * 0.5);
-  right.name = "neighbourhoodFallbackWallR";
-  parent.add(right);
-}
-
-function countDrawableNeighbourhoodMeshes(root) {
-  let n = 0;
-  root.traverse((o) => {
-    if (o.isMesh || o.isInstancedMesh) n += 1;
-  });
-  return n;
-}
-
-/** Load neighbourhood GLB into scene (idempotent). */
-async function buildNeighbourhoodWorldInternal() {
-  if (neighbourhoodWorldGroup) return;
-  await tryLoadNeighbourhoodSurfaceTexturesOnce();
-  const g = new THREE.Group();
-  g.name = "neighbourhoodWorld";
-  let loadedUrl = "";
-  try {
-    let gltf = null;
-    for (const url of NEIGHBOURHOOD_CITY_GLB_URLS) {
-      try {
-        gltf = await loadGltf(url);
-        loadedUrl = url;
-        break;
-      } catch (e) {
-        console.warn("[World] Neighbourhood load failed, next URL:", url, e);
-      }
-    }
-    if (!gltf) throw new Error("All neighbourhood GLB URLs failed");
-    const hood = gltf.scene.clone(true);
-    hood.name = "neighbourhoodCity";
-    hood.traverse((ch) => {
-      if (ch.isMesh) {
-        ch.castShadow = true;
-        ch.receiveShadow = true;
-      }
-    });
-    fitNeighbourhoodToAlley(hood, NEIGHBOURHOOD_RUN_WIDTH, NEIGHBOURHOOD_RUN_LENGTH);
-    offsetNeighbourhoodSoRoadCentersOnRunAxis(hood);
-    hood.updateMatrixWorld(true);
-    hood.traverse((ch) => {
-      if ((ch.isMesh || ch.isInstancedMesh) && shouldHideNeighbourhoodMesh(ch)) {
-        ch.visible = false;
-      }
-    });
-    g.add(hood);
-    console.info("[World] Neighbourhood GLB loaded:", loadedUrl);
-  } catch (err) {
-    console.error("[World] Neighbourhood GLB failed:", err);
-  }
-  if (countDrawableNeighbourhoodMeshes(g) === 0) {
-    console.warn("[World] No neighbourhood meshes — adding fallback strip.");
-    addNeighbourhoodFallbackStrip(g);
-  }
-  g.position.set(0, RUNWAY_SURFACE_Y, 0);
-  g.updateMatrixWorld(true);
-  const worldBox = new THREE.Box3().setFromObject(g);
-  if (!worldBox.isEmpty()) {
-    g.position.z = RUN_START_Z - NEIGHBOURHOOD_SPAWN_LEAD_Z - worldBox.min.z;
-  }
-  g.updateMatrixWorld(true);
-  const hoodChild = g.getObjectByName("neighbourhoodCity");
-  if (hoodChild) {
-    alignNeighbourhoodRoadTopToRunSurfaceY(g, hoodChild);
-    applyNeighbourhoodBuildingMaterials(hoodChild);
-  }
-  g.visible = true;
-  scene.add(g);
-  neighbourhoodWorldGroup = g;
-}
-
-/** Await this before starting a run — starts fetch on first boot if needed. */
-async function ensureNeighbourhoodWorldLoaded() {
-  if (neighbourhoodWorldGroup) return;
-  if (!neighbourhoodLoadPromise) {
-    neighbourhoodLoadPromise = buildNeighbourhoodWorldInternal().catch((err) => {
-      neighbourhoodLoadPromise = null;
-      throw err;
-    });
-  }
-  await neighbourhoodLoadPromise;
-}
-
 async function buildNeighbourhoodWorld() {
-  await ensureNeighbourhoodWorldLoaded();
+  // Replaced by rooftop building pool — nothing async needed
 }
+
+async function ensureNeighbourhoodWorldLoaded() {
+  // No-op: rooftop world is built synchronously in bootstrap
+}
+
+async function tryLoadNeighbourhoodSurfaceTexturesOnce() {
+  await tryLoadSkyBackgroundOnce();
+}
+
 
 /** Gray shell with `tex` on +Z / −Z (along the track). */
 function makeTexturedEndsBox(tex, w, h, d, sideColor = 0x8c9096) {
@@ -3839,7 +3157,7 @@ function updateCoinsVisual() {
 function spawnContentAhead() {
   const pz = playerBody.position.z;
   while (nextSpawnZ < pz + SPAWN_Z_AHEAD_MAX) {
-    const laneIdx = Math.floor(rng() * 3);
+    const laneIdx = Math.floor(rng() * LANES.length);
     if (
       OBSTACLES_ENABLED &&
       obstacleVariantSpecs.length > 0 &&
@@ -3849,7 +3167,7 @@ function spawnContentAhead() {
     }
     if (COINS_ENABLED) {
       const groundTrail = 4 + Math.floor(rng() * 4);
-      const groundLane = Math.floor(rng() * 3);
+      const groundLane = Math.floor(rng() * LANES.length);
       spawnCoinTrail(nextSpawnZ - 5 - groundTrail * 1.5, groundLane, groundTrail, {
         spacing: 3.1,
         minY: 0.78,
@@ -3858,7 +3176,7 @@ function spawnContentAhead() {
       });
 
       const airTrail = 3 + Math.floor(rng() * 3);
-      const airLane = Math.floor(rng() * 3);
+      const airLane = Math.floor(rng() * LANES.length);
       spawnCoinTrail(nextSpawnZ - 2.5 - airTrail * 1.35, airLane, airTrail, {
         spacing: 2.9,
         minY: 2.0,
@@ -3866,7 +3184,7 @@ function spawnContentAhead() {
         sparkleBoost: 1.2,
       });
     }
-    nextSpawnZ += TILE_Z;
+    nextSpawnZ += BUILDING_CYCLE;
     obstacleSpawnIndex += 1;
   }
 }
@@ -3910,9 +3228,30 @@ function checkCoinCollection() {
   }
 }
 
-function syncPlayerFacingFromVelocity() {
+function syncPlayerFacingFromVelocity(dt) {
   if (!playerRoot || !playerBody) return;
-  lastRunForward.copy(_runForward);
+  const dti = typeof dt === "number" && dt > 0 ? Math.min(dt, 0.05) : 0.016;
+  const kb = getControlMode() === "kb";
+  if (kb && state === "playing" && !runPaused) {
+    const vx = playerBody.velocity.x;
+    const vz = playerBody.velocity.z;
+    const sp2 = vx * vx + vz * vz;
+    if (sp2 > 0.08 && isForwardLocomotionActive()) {
+      _kbFacingHint.set(vx, 0, vz);
+      _kbFacingHint.normalize();
+      const u = 1 - Math.exp(-dti * KB_FACING_FROM_VEL_RATE);
+      _kbFacingSm.lerp(_kbFacingHint, u);
+    } else {
+      const u = 1 - Math.exp(-dti * KB_FACING_SNAP_BACK_RATE);
+      _kbFacingSm.lerp(_runForward, u);
+    }
+    _kbFacingSm.y = 0;
+    if (_kbFacingSm.lengthSq() < 1e-6) _kbFacingSm.copy(_runForward);
+    else _kbFacingSm.normalize();
+    lastRunForward.copy(_kbFacingSm);
+  } else {
+    lastRunForward.copy(_runForward);
+  }
   playerRoot.rotation.y =
     Math.atan2(lastRunForward.x, lastRunForward.z) + CEEZ_RUN_HEADING_Y_OFFSET;
 }
@@ -3920,7 +3259,7 @@ function syncPlayerFacingFromVelocity() {
 function syncPlayerMesh(dt) {
   playerRoot.position.copy(playerBody.position);
 
-  syncPlayerFacingFromVelocity();
+  syncPlayerFacingFromVelocity(dt);
 
   const inActiveRun = state === "playing" && !runPaused;
   if (ceezAnimMixer && inActiveRun) {
@@ -3944,9 +3283,6 @@ function resetRun() {
   rng = mulberry32((Math.random() * 0xffffffff) >>> 0);
   applyNeighbourhoodRunStartState();
   laneIndex = 1;
-  laneNavLastLeftMs = 0;
-  laneNavLastRightMs = 0;
-  lastWorldRunTurnAtMs = 0;
   committedRunYaw = 0;
   yawSteer = 0;
   resetKbSteeringState();
@@ -3954,6 +3290,7 @@ function resetRun() {
   runOrigin.set(0, 0, 0);
   updateRunBasisVectors();
   lastRunForward.copy(_runForward);
+  _kbFacingSm.copy(_runForward);
   cameraSmoothedForward.copy(_runForward);
   runDistanceTraveledM = RUN_START_Z;
   coins = 0;
@@ -3977,8 +3314,8 @@ function resetRun() {
 
   playerBody.velocity.set(0, 0, 0);
   playerBody.position.set(LANES[laneIndex], RUNWAY_SURFACE_Y + PLAYER_HALF.y, RUN_START_Z);
-  nextSpawnZ = Math.floor((RUN_START_Z + SPAWN_Z_AHEAD_MIN) / TILE_Z) * TILE_Z;
-  obstacleSpawnIndex = Math.max(0, Math.floor(nextSpawnZ / TILE_Z) % OBSTACLE_BUILDING_INTERVAL);
+  nextSpawnZ = Math.floor((RUN_START_Z + SPAWN_Z_AHEAD_MIN) / BUILDING_CYCLE) * BUILDING_CYCLE;
+  obstacleSpawnIndex = Math.max(0, Math.floor(nextSpawnZ / BUILDING_CYCLE) % OBSTACLE_BUILDING_INTERVAL);
   if (OBSTACLES_ENABLED && obstacleVariantSpecs.length > 0) {
     spawnObstacle(RUN_START_Z + 20, 1);
     obstacleSpawnIndex += 1;
@@ -4073,12 +3410,39 @@ function showGameOverScreen(score) {
   state = "gameOver";
 }
 
-/** Pit or last life — game over screen, then main menu from button. */
-function endGameLoss() {
-  if (state !== "playing") return;
-  const dist = Math.max(0, Math.floor(runDistanceTraveledM));
-  const score = dist + coins * 100;
-  showGameOverScreen(score);
+/**
+ * Put the player back on the runway at the current forward progress (keeps run / score).
+ * @param {{ refillLives?: boolean }} [options]
+ */
+function respawnPlayerOnRunway(options) {
+  const refillLives = options?.refillLives === true;
+  if (!playerBody || state !== "playing") return;
+  updateRunBasisVectors();
+  const F = _runForward;
+  const R = _runRight;
+  const p = playerBody.position;
+  let tAlong = (p.x - runOrigin.x) * F.x + (p.z - runOrigin.z) * F.z;
+  if (ENABLE_GAPS) {
+    for (let i = 0; i < 24; i++) {
+      const cz = runOrigin.z + F.z * tAlong;
+      if (!isRooftopGap(cz)) break;
+      tAlong -= BUILDING_CYCLE * 0.5;
+    }
+  }
+  const L = LANES[laneIndex];
+  const safeX = runOrigin.x + F.x * tAlong + R.x * L;
+  const safeZ = runOrigin.z + F.z * tAlong + R.z * L;
+  const safeY = RUNWAY_SURFACE_Y + PLAYER_HALF.y;
+  playerBody.position.set(safeX, safeY, safeZ);
+  playerBody.velocity.set(0, 0, 0);
+  playerBody.angularVelocity.set(0, 0, 0);
+  invincibleUntil = performance.now() + INVINCIBLE_MS;
+  if (refillLives) {
+    lives = 3;
+    updateHeartsDom();
+  }
+  updateRunBasisVectors();
+  _kbFacingSm.copy(_runForward);
 }
 
 /** After level-1 end cinematic — return to main menu with best score updated. */
@@ -4110,7 +3474,6 @@ function stepPlaying(dt) {
   tryStartLevel1EndInAir();
   tryCompleteLevel1AfterLanding();
 
-  applyKbArrowSteering(dt);
   syncWorldRunYawFromParts();
   updateRunBasisVectors();
 
@@ -4124,10 +3487,11 @@ function stepPlaying(dt) {
     const kb = getControlMode() === "kb";
     const locomotion = isForwardLocomotionActive();
     const sprint = isRunSprintActive();
-    const vR_desired = kb ? 0 : latErr * LANE_SMOOTH;
     const blocked = level1VictoryFreeze;
-    const vF_mag = blocked || !locomotion ? 0 : sprint ? FORWARD_SPEED : WALK_SPEED;
+    const vF_mag =
+      blocked || !locomotion ? 0 : kb || sprint ? FORWARD_SPEED : WALK_SPEED;
     if (!blocked) {
+      const vR_desired = latErr * LANE_SMOOTH;
       playerBody.velocity.x = F.x * vF_mag + R.x * vR_desired;
       playerBody.velocity.z = F.z * vF_mag + R.z * vR_desired;
       if (locomotion) runDistanceTraveledM += vF_mag * dt;
@@ -4139,9 +3503,12 @@ function stepPlaying(dt) {
 
   world.step(1 / 60, dt, 4);
 
-  if (!passedFinishRibbon && playerBody.position.y < -5.5) {
-    endGameLoss();
-    return;
+  if (
+    playerBody.position.y < -(BUILDING_FACADE_HEIGHT + 4) &&
+    !level1VictoryFreeze &&
+    !level1EndCinematicStarted
+  ) {
+    respawnPlayerOnRunway({ refillLives: false });
   }
 
   syncPlayerMesh(dt);
@@ -4149,7 +3516,6 @@ function stepPlaying(dt) {
   recycleGroundTiles();
   spawnContentAhead();
   cullBehind();
-  syncVisibleRunwayPlane();
   if (COINS_ENABLED) {
     updateCoinsVisual();
     checkCoinCollection();
@@ -4171,7 +3537,7 @@ function animate() {
       updateHud(dt);
     } else if (playerRoot && playerBody) {
       playerRoot.position.copy(playerBody.position);
-      syncPlayerFacingFromVelocity();
+      syncPlayerFacingFromVelocity(dt);
       syncVisibleRunwayPlane();
       updateCamera();
     } else {
@@ -4377,48 +3743,48 @@ function bindUi() {
       }
       if (state !== "playing" || runPaused) return;
       if (level1VictoryFreeze || level1EndCinematicStarted) return;
-      if (e.code === "KeyZ") {
-        e.preventDefault();
-        if (!e.repeat) kbKeyZHeld = true;
-        return;
-      }
       const kbKeys = getControlMode() === "kb";
       if (kbKeys) {
-        if (e.code === "ArrowLeft" || e.code === "KeyA") {
+        if (e.code === "ArrowUp") {
+          if (e.repeat) return;
           e.preventDefault();
-          if (!e.repeat) {
-            if (e.code === "ArrowLeft") onKbLeftArrowDown();
-            else kbKeyADown = true;
-          }
+          fireSeeds();
+          return;
+        }
+        if (e.code === "ArrowDown") {
+          if (e.repeat) return;
+          e.preventDefault();
+          throwBanana();
+          return;
+        }
+        if (e.code === "ArrowLeft" || e.code === "KeyA") {
+          if (e.repeat) return;
+          e.preventDefault();
+          tryNavigateLaneOrTurnLeft();
           return;
         }
         if (e.code === "ArrowRight" || e.code === "KeyD") {
+          if (e.repeat) return;
           e.preventDefault();
-          if (!e.repeat) {
-            if (e.code === "ArrowRight") onKbRightArrowDown();
-            else kbKeyDDown = true;
-          }
+          tryNavigateLaneOrTurnRight();
           return;
         }
       } else {
+        if (e.code === "KeyZ") {
+          e.preventDefault();
+          if (!e.repeat) kbKeyZHeld = true;
+          return;
+        }
         if (e.code === "KeyA" || e.code === "ArrowLeft" || e.code === "KeyQ") {
           if (e.repeat) return;
           e.preventDefault();
-          if (e.shiftKey) {
-            turnRunWorldLeft();
-          } else {
-            tryNavigateLaneOrTurnLeft();
-          }
+          tryNavigateLaneOrTurnLeft();
           return;
         }
         if (e.code === "KeyD" || e.code === "ArrowRight" || e.code === "KeyE") {
           if (e.repeat) return;
           e.preventDefault();
-          if (e.shiftKey) {
-            turnRunWorldRight();
-          } else {
-            tryNavigateLaneOrTurnRight();
-          }
+          tryNavigateLaneOrTurnRight();
           return;
         }
       }
@@ -4428,7 +3794,7 @@ function bindUi() {
         playJumpOverObstaclesAnim();
         return;
       }
-      if (e.code === "ArrowDown") {
+      if (!kbKeys && e.code === "ArrowDown") {
         if (e.repeat) return;
         e.preventDefault();
         throwBanana();
@@ -4440,7 +3806,7 @@ function bindUi() {
         throwBanana();
         return;
       }
-      if (e.code === "KeyN") {
+      if (!kbKeys && e.code === "KeyN") {
         if (e.repeat) return;
         e.preventDefault();
         fireSeeds();
@@ -4452,11 +3818,6 @@ function bindUi() {
     "keyup",
     (e) => {
       if (e.code === "KeyZ") kbKeyZHeld = false;
-      if (getControlMode() !== "kb") return;
-      if (e.code === "ArrowLeft") onKbLeftArrowUp();
-      if (e.code === "ArrowRight") onKbRightArrowUp();
-      if (e.code === "KeyA") kbKeyADown = false;
-      if (e.code === "KeyD") kbKeyDDown = false;
     },
     true
   );
@@ -4471,17 +3832,21 @@ async function bootstrap() {
   applyTouchLayout();
   initThree();
   initPhysics();
-  await tryLoadNeighbourhoodSurfaceTexturesOnce();
-  void ensureNeighbourhoodWorldLoaded().catch((err) => {
-    console.warn("[World] Background preload:", err?.message || err);
-  });
+  await tryLoadSkyBackgroundOnce();
   bindUi();
 
+  const bananaUrls = [`${DIR_ASSETS}placeholders/banana_projectile.gltf`, `${DIR_PLACEHOLDERS}banana_projectile.gltf`];
   let bananaGltf = null;
-  try {
-    bananaGltf = await loadGltf(`${DIR_PLACEHOLDERS}banana_projectile.gltf`);
-  } catch (err) {
-    console.warn("Banana projectile GLTF failed; banana action disabled until file exists.", err);
+  for (const url of bananaUrls) {
+    try {
+      bananaGltf = await loadGltf(url);
+      break;
+    } catch (err) {
+      console.warn("Banana projectile GLTF failed:", url, err);
+    }
+  }
+  if (!bananaGltf) {
+    console.warn("Banana projectile unavailable; banana throw disabled.");
   }
   bananaTemplate = bananaGltf?.scene ?? null;
 
