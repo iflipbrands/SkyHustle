@@ -6,15 +6,13 @@ import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { clone as cloneSkinnedHierarchy } from "three/addons/utils/SkeletonUtils.js";
 import * as CANNON from "cannon-es";
 
-/** Four lane centers across the rooftop strip (`laneIndex` 0…3). {@link tryNavigateLaneOrTurnLeft} / Right step one lane (HUD + keyboard). */
-const LANES = [-3.75, -1.25, 1.25, 3.75];
-/** Forward run speed (m/s-ish) for touch / 1h / 2h — full tilt. */
-const FORWARD_SPEED = 11;
-/** Keyboard: continuous run at {@link FORWARD_SPEED} (same as sprint); lanes use arrow keys. */
+/** Three lane centers on each rooftop (`laneIndex` 0 | 1 | 2). ← / → step one lane. */
+const LANES = [-1.82, 0, 1.82];
+/** Auto-run forward speed (m/s) — always on while playing; no key to hold. */
+const FORWARD_SPEED = 15;
+/** Legacy — only used if locomotion is explicitly slowed. */
 const WALK_SPEED = 4.75;
-/** When no dedicated walk FBX: slow the run clip for KB stroll. */
-const WALK_RUN_ANIM_TIME_SCALE = 0.52;
-const LANE_SMOOTH = 14;
+const LANE_SMOOTH = 22;
 const PLAYER_HALF = new CANNON.Vec3(0.28, 0.88, 0.24);
 /** Top Y of runway collider — must match ground tile `body.position.y` + box half Y in `buildGroundTiles` / `recycleGroundTiles`. */
 const RUNWAY_SURFACE_Y = 0.14 + 0.14;
@@ -24,7 +22,9 @@ const JUMP_IN_AIR_TIME_SCALE = 0.48;
 const SPACE_JUMP_VY = 13.5;
 const SPACE_JUMP_GROUND_EPS = 0.14;
 const SPACE_JUMP_MAX_UPWARD_VY = 0.5;
-/** Runway stays solid through this forward distance (m); scripted gap follows. No in-world finish marker. */
+/** When true, crossing {@link FINISH_RIBBON_Z} triggers level-end overlay → main menu. */
+const ENABLE_LEVEL_AUTO_END = false;
+/** Distance (m) for optional level finish — only used if {@link ENABLE_LEVEL_AUTO_END}. */
 const FINISH_RIBBON_Z = 500;
 /** Recycled ground tile center at this Z is the story gap (one TILE_Z wide). */
 const LEVEL1_GAP_TILE_CENTER_Z = 590;
@@ -47,7 +47,7 @@ const DIR_PLACEHOLDERS = `${DIR_ASSETS}placeholders/`;
  * | What | Constants / functions |
  * |------|------------------------|
  * | Roof + gap rhythm | `BUILDING_DEPTH`, `BUILDING_GAP`, `BUILDING_CYCLE`, `isRooftopGap` |
- * | Run strip width | `BUILDING_WIDTH`, `LANES` (four lanes) |
+ * | Run strip width | `BUILDING_WIDTH`, `LANES` (three lanes) |
  * | Façade / gravel look | `BUILDING_FACADE_*`, `BUILDING_MORTAR`, `ROOFTOP_SURFACE_COLOR` |
  * | Skyline depth | `buildSkylineBuilding`, `buildSkylinePool` |
  */
@@ -83,8 +83,8 @@ const BUILDING_DEPTH = 28;
 const BUILDING_GAP = 5.0;
 /** One tile cycle = one rooftop + one gap. */
 const BUILDING_CYCLE = BUILDING_DEPTH + BUILDING_GAP;
-/** Rooftop width — fits four run lanes with side ledges. */
-const BUILDING_WIDTH = 12.2;
+/** Rooftop width — three run lanes with side ledges. */
+const BUILDING_WIDTH = 11;
 /** Height of building facades visible below the rooftop edge. */
 const BUILDING_FACADE_HEIGHT = 24;
 /** How many building platforms to keep in the recycling pool. */
@@ -719,48 +719,23 @@ async function tryBindJumpOverObstaclesAction(mixer, runAction) {
   }
 }
 
-/**
- * Blend walk vs run on the Ceez mixer (also used after jump / throw one-shots finish).
- * When {@link ceezWalkAction} is null, falls back to run-only + {@link WALK_RUN_ANIM_TIME_SCALE}.
- */
+/** Loop {@link animations/RunFast.fbx} continuously; jump/throw one-shots fade run to 0 briefly. */
 function syncCeezWalkRunLocomotionWeights() {
   if (!ceezRunAction) return;
+  if (ceezWalkAction) {
+    ceezWalkAction.setEffectiveWeight(0);
+    ceezWalkAction.enabled = false;
+  }
   const suppressRunForJump = isJumpOverObstaclesPoseActive();
-  const locomotion = suppressRunForJump ? false : isForwardLocomotionActive();
-  const sprint = suppressRunForJump ? false : isRunSprintActive();
-
-  if (!ceezWalkAction) {
-    const playLoco = locomotion || sprint;
-    ceezRunAction.enabled = true;
-    ceezRunAction.setEffectiveWeight(playLoco ? 1 : 0);
-    if (playLoco) {
-      ceezRunAction.paused = false;
-      if (!ceezRunAction.isRunning()) {
-        ceezRunAction.reset().fadeIn(0.08).play();
-      }
-      ceezRunAction.timeScale = sprint ? 1 : WALK_RUN_ANIM_TIME_SCALE;
-    }
-    return;
-  }
-
+  const playRun = !suppressRunForJump && isForwardLocomotionActive() && isRunSprintActive();
   ceezRunAction.enabled = true;
-  ceezWalkAction.enabled = true;
-  if (!locomotion) {
-    ceezRunAction.setEffectiveWeight(0);
-    ceezWalkAction.setEffectiveWeight(0);
-    return;
-  }
-  if (sprint) {
-    ceezWalkAction.setEffectiveWeight(0);
-    ceezRunAction.setEffectiveWeight(1);
+  ceezRunAction.setEffectiveWeight(playRun ? 1 : 0);
+  if (playRun) {
     ceezRunAction.paused = false;
-    if (!ceezRunAction.isRunning()) ceezRunAction.reset().fadeIn(0.08).play();
+    if (!ceezRunAction.isRunning()) {
+      ceezRunAction.reset().fadeIn(0.06).play();
+    }
     ceezRunAction.timeScale = 1;
-  } else {
-    ceezRunAction.setEffectiveWeight(0);
-    ceezWalkAction.setEffectiveWeight(1);
-    if (!ceezWalkAction.isRunning()) ceezWalkAction.reset().fadeIn(0.08).play();
-    ceezWalkAction.timeScale = 1;
   }
 }
 
@@ -1111,8 +1086,9 @@ async function applyObjFallbackTexture(root) {
  * @returns {{ root: THREE.Object3D; mixer: THREE.AnimationMixer; runAction: THREE.AnimationAction; throwAction: THREE.AnimationAction | null } | null}
  */
 function attachRunAnimation(root, clips) {
-  const clip = pickLocomotionClip(clips);
-  if (!clip) return null;
+  const raw = pickLocomotionClip(clips);
+  if (!raw) return null;
+  const clip = animationClipWithoutRootPositionTracks(raw);
   const mixer = new THREE.AnimationMixer(root);
   mixer.stopAllAction();
   const runAction = mixer.clipAction(clip);
@@ -1140,8 +1116,9 @@ function attachRunAnimation(root, clips) {
  * @returns {{ root: THREE.Object3D; mixer: THREE.AnimationMixer; runAction: THREE.AnimationAction; throwAction: THREE.AnimationAction | null } | null}
  */
 function attachSplitActions(root, runClips, throwClips = []) {
-  const runClip = pickLocomotionClip(runClips);
-  if (!runClip) return null;
+  const rawRun = pickLocomotionClip(runClips);
+  if (!rawRun) return null;
+  const runClip = animationClipWithoutRootPositionTracks(rawRun);
   const mixer = new THREE.AnimationMixer(root);
   mixer.stopAllAction();
   const runAction = mixer.clipAction(runClip);
@@ -1483,13 +1460,11 @@ function isForwardLocomotionActive() {
   return true;
 }
 
-/** Sprint: full {@link FORWARD_SPEED} + run anim at full speed. Keyboard = always continuous run. */
+/** Full-speed run clip ({@link CEEZ_RUN_ACTION_FBX}) whenever the level run is active. */
 function isRunSprintActive() {
   if (level1VictoryFreeze || level1EndCinematicStarted) return false;
-  if (getControlMode() === "kb") return true;
-  const mode = getControlMode();
-  if ((mode === "1h" || mode === "2h") && "ontouchstart" in window) return true;
-  return kbKeyZHeld;
+  if (state !== "playing" || runPaused) return false;
+  return true;
 }
 
 function setControlMode(mode) {
@@ -2089,8 +2064,11 @@ function isPlayerGroundedForSpaceJump() {
 function playJumpOverObstaclesAnim() {
   if (state !== "playing" || runPaused) return;
   if (level1VictoryFreeze || level1EndCinematicStarted) return;
-  if (!ceezJumpOverObstaclesAction) return;
   if (!playerBody || !isPlayerGroundedForSpaceJump()) return;
+  if (!ceezJumpOverObstaclesAction) {
+    playerBody.velocity.y = Math.max(playerBody.velocity.y, SPACE_JUMP_VY);
+    return;
+  }
 
   if (ceezRunAction) {
     ceezRunAction.enabled = true;
@@ -2290,6 +2268,7 @@ function showLevel1EndOverlayBeginning() {
 }
 
 function tryStartLevel1EndInAir() {
+  if (!ENABLE_LEVEL_AUTO_END) return;
   if (level1EndCinematicStarted || level1VictoryFreeze) return;
   if (!passedFinishRibbon || !playerBody) return;
   const pz = playerBody.position.z;
@@ -2311,11 +2290,13 @@ function beginLevel1VictoryFreezeAfterLand() {
 }
 
 function passFinishRibbonIfNeeded() {
+  if (!ENABLE_LEVEL_AUTO_END) return;
   if (passedFinishRibbon) return;
   if (runDistanceTraveledM >= FINISH_RIBBON_Z) passedFinishRibbon = true;
 }
 
 function tryCompleteLevel1AfterLanding() {
+  if (!ENABLE_LEVEL_AUTO_END) return;
   if (level1VictoryFreeze) return;
   if (!passedFinishRibbon || !playerBody) return;
   if (playerBody.position.z < LEVEL1_LAND_COMPLETE_MIN_Z && runDistanceTraveledM < LEVEL1_LAND_COMPLETE_MIN_Z) return;
@@ -2556,11 +2537,24 @@ async function buildPlayer() {
       ceezJumpOverObstaclesAction = null;
       if (ceezAnimMixer && ceezRunAction) {
         ceezJumpOverObstaclesAction = await tryBindJumpOverObstaclesAction(ceezAnimMixer, ceezRunAction);
-        ceezWalkAction = await tryBindWalkingLocomotion(ceezAnimMixer);
+        ceezWalkAction = null;
+        syncCeezWalkRunLocomotionWeights();
       }
     } else {
       try {
         ceez = await loadCeezFromObj();
+        const rebound = await tryBindFastRunAnimationsToRoot(ceez);
+        if (rebound) {
+          ceezAnimMixer = rebound.mixer;
+          ceezRunAction = rebound.runAction;
+          ceezThrowAction = rebound.throwAction || null;
+          if (ceezAnimMixer && ceezRunAction) {
+            ceezJumpOverObstaclesAction = await tryBindJumpOverObstaclesAction(
+              ceezAnimMixer,
+              ceezRunAction
+            );
+          }
+        }
       } catch (err) {
         console.warn("Ceez OBJ/MTL failed, trying placeholder GLTF.", err);
         usePlaceholder = true;
@@ -2572,9 +2566,9 @@ async function buildPlayer() {
           ceez = buildGreyPlayerVisual();
         }
       }
-      if (!usePlaceholder) {
-        console.info(
-          "Ceez: OBJ has no actions — add characters/Ceez/new/FastRun.fbx (or ceez.glb / ceez.fbx with a run clip) to enable the run cycle."
+      if (!ceezRunAction && !usePlaceholder) {
+        console.warn(
+          `Ceez: no run clip — ensure ${CEEZ_RUN_ACTION_FBX} matches the rig (Meshy / split / GLTF).`
         );
       }
     }
@@ -2798,8 +2792,9 @@ function recycleRooftopBuildings() {
   rooftopBuildings.forEach(({ group, body }, i) => {
     const centerZ = firstTileZ + i * BUILDING_CYCLE + BUILDING_DEPTH * 0.5;
 
+    const roofThick = 0.28;
     group.position.set(0, 0, centerZ);
-    body.position.set(0, RUNWAY_SURFACE_Y - 0.14, centerZ);
+    body.position.set(0, RUNWAY_SURFACE_Y - roofThick * 0.5, centerZ);
     body.velocity.set(0, 0, 0);
     body.angularVelocity.set(0, 0, 0);
     body.wakeUp();
@@ -3265,7 +3260,7 @@ function syncPlayerMesh(dt) {
   if (ceezAnimMixer && inActiveRun) {
     ceezAnimMixer.update(dt);
   }
-  if (ceezRunAction && inActiveRun) {
+  if (ceezAnimMixer && inActiveRun) {
     syncCeezWalkRunLocomotionWeights();
   }
   if (rayMesh) {
@@ -3292,7 +3287,7 @@ function resetRun() {
   lastRunForward.copy(_runForward);
   _kbFacingSm.copy(_runForward);
   cameraSmoothedForward.copy(_runForward);
-  runDistanceTraveledM = RUN_START_Z;
+  runDistanceTraveledM = 0;
   coins = 0;
   lives = 3;
   invincibleUntil = 0;
@@ -3327,6 +3322,9 @@ function resetRun() {
     rayMesh.rotation.x = 0;
     rayMesh.rotation.z = 0;
   }
+  recycleRooftopBuildings();
+  playerBody?.wakeUp();
+  syncCeezWalkRunLocomotionWeights();
 }
 
 async function startGame() {
@@ -3349,6 +3347,7 @@ async function startGame() {
   playerNameInput?.blur();
   canvas?.focus({ preventScroll: true });
   syncGameMusicWithSettings();
+  syncCeezWalkRunLocomotionWeights();
 }
 
 /** Leave the run for the main menu; optionally beat the saved high score. */
@@ -3460,40 +3459,35 @@ function updateHud(dt) {
       hudDistance.textContent = `Level complete`;
     } else if (level1EndCinematicStarted) {
       hudDistance.textContent = `Finishing…`;
-    } else if (passedFinishRibbon) {
+    } else if (passedFinishRibbon && ENABLE_LEVEL_AUTO_END) {
       hudDistance.textContent = `${elapsedSecs.toFixed(1)} s`;
     } else {
-      const remain = Math.max(0, Math.ceil(FINISH_RIBBON_Z - runDistanceTraveledM));
-      hudDistance.textContent = `${remain} m · ${elapsedSecs.toFixed(1)} s`;
+      hudDistance.textContent = `${dist} m · ${elapsedSecs.toFixed(1)} s`;
     }
   }
 }
 
 function stepPlaying(dt) {
-  passFinishRibbonIfNeeded();
-  tryStartLevel1EndInAir();
-  tryCompleteLevel1AfterLanding();
+  if (ENABLE_LEVEL_AUTO_END) {
+    passFinishRibbonIfNeeded();
+    tryStartLevel1EndInAir();
+    tryCompleteLevel1AfterLanding();
+  }
 
   syncWorldRunYawFromParts();
   updateRunBasisVectors();
 
   {
-    const F = _runForward;
-    const R = _runRight;
     const p = playerBody.position;
-    const lat = (p.x - runOrigin.x) * R.x + (p.z - runOrigin.z) * R.z;
     const latTarget = LANES[laneIndex];
-    const latErr = latTarget - lat;
-    const kb = getControlMode() === "kb";
+    const latErr = latTarget - p.x;
     const locomotion = isForwardLocomotionActive();
-    const sprint = isRunSprintActive();
     const blocked = level1VictoryFreeze;
-    const vF_mag =
-      blocked || !locomotion ? 0 : kb || sprint ? FORWARD_SPEED : WALK_SPEED;
+    const vF_mag = blocked || !locomotion ? 0 : FORWARD_SPEED;
     if (!blocked) {
-      const vR_desired = latErr * LANE_SMOOTH;
-      playerBody.velocity.x = F.x * vF_mag + R.x * vR_desired;
-      playerBody.velocity.z = F.z * vF_mag + R.z * vR_desired;
+      playerBody.wakeUp();
+      playerBody.velocity.x = latErr * LANE_SMOOTH;
+      playerBody.velocity.z = vF_mag;
       if (locomotion) runDistanceTraveledM += vF_mag * dt;
     } else {
       playerBody.velocity.x = 0;
@@ -3743,6 +3737,13 @@ function bindUi() {
       }
       if (state !== "playing" || runPaused) return;
       if (level1VictoryFreeze || level1EndCinematicStarted) return;
+      if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
+        if (e.repeat) return;
+        e.preventDefault();
+        if (e.code === "ArrowLeft") tryNavigateLaneOrTurnLeft();
+        else tryNavigateLaneOrTurnRight();
+        return;
+      }
       const kbKeys = getControlMode() === "kb";
       if (kbKeys) {
         if (e.code === "ArrowUp") {
@@ -3757,13 +3758,13 @@ function bindUi() {
           throwBanana();
           return;
         }
-        if (e.code === "ArrowLeft" || e.code === "KeyA") {
+        if (e.code === "KeyA") {
           if (e.repeat) return;
           e.preventDefault();
           tryNavigateLaneOrTurnLeft();
           return;
         }
-        if (e.code === "ArrowRight" || e.code === "KeyD") {
+        if (e.code === "KeyD") {
           if (e.repeat) return;
           e.preventDefault();
           tryNavigateLaneOrTurnRight();
